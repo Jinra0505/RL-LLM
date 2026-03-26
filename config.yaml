@@ -1,0 +1,63 @@
+llm:
+  timeout_seconds: 45
+  max_retries: 2
+  temperature: 0.3
+  max_tokens: 1400
+
+outer_loop:
+  rounds: 1
+  candidates_per_round: 2
+
+selection:
+  higher_is_better: true
+  task_mode_metric_weights:
+    communication_priority:
+      communication_recovery_ratio: 0.65
+      success_rate: 0.2
+      constraint_violation_count: -0.15
+    critical_load_priority:
+      power_recovery_ratio: 0.65
+      success_rate: 0.2
+      constraint_violation_count: -0.15
+    system_recovery_priority:
+      success_rate: 0.45
+      communication_recovery_ratio: 0.2
+      power_recovery_ratio: 0.2
+      transportation_recovery_ratio: 0.15
+    stabilization_priority:
+      success_rate: 0.25
+      constraint_violation_count: -0.55
+      mean_progress_delta: 0.2
+
+# If null, full revised_state is used for policy keys (no truncation).
+state_representation:
+  max_revised_dim: null
+
+task_modes:
+  default: system_recovery_priority
+  allowed:
+    - communication_priority
+    - critical_load_priority
+    - system_recovery_priority
+    - stabilization_priority
+
+env:
+  name: mock_recovery
+  observation_fields:
+    - communication_recovery_level
+    - critical_load_recovery_level
+    - transportation_accessibility
+    - available_repair_resources
+    - mobile_energy_storage_state
+    - stage_indicator
+    - constraint_flag
+
+training:
+  train_episodes: 20
+  eval_episodes: 8
+  max_steps_per_episode: 40
+  gamma: 0.95
+
+paths:
+  generated_dir: generated
+  outputs_dir: outputs
