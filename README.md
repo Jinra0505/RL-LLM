@@ -1,8 +1,8 @@
-# RL+LLM ProjectRecovery Prototype (Medium-Complexity)
+# RL+LLM Tri-Layer Recovery Project (Experiment-Ready)
 
 This repository implements a lightweight but project-grade RL+LLM workflow for post-disaster coordinated recovery:
 
-`run_outer_loop.py -> llm_client.py -> generated candidate module -> train_rl.py -> outputs`
+`run_outer_loop.py -> router.py/llm_client.py -> generated candidate module -> train_rl.py -> outputs`
 
 ## Environment: explicit zonal three-layer coupled recovery
 
@@ -72,22 +72,46 @@ Available modes:
 
 Router uses stage + weakest layer + weakest zone + critical-load shortfall + violation frequency.
 
-## Run
+## Experiments
 
 Install:
 ```bash
 pip install -r requirements.txt
 ```
 
-Baseline run:
+### Experiment 1: baseline_noop vs RL+LLM
+
+Baseline (no-op shaping):
 ```bash
 python train_rl.py --env project_recovery --llm-mode mock --task-mode coordinated_restoration --revise-module baseline_noop.py --output outputs/exp1_baseline.json
 ```
 
-RL+LLM run:
+RL+LLM outer loop:
 ```bash
 python run_outer_loop.py --env project_recovery --llm-mode mock
 ```
+
+### Experiment 3: severity / task-mode comparison
+
+Change severity in `config.yaml` (`mild`, `moderate`, `severe`) and rerun:
+```bash
+python run_outer_loop.py --env project_recovery --llm-mode mock --router-mode rule
+```
+
+You can also pin task mode:
+```bash
+python run_outer_loop.py --env project_recovery --llm-mode mock --fixed-task-mode backbone_comm_priority
+```
+
+## Outputs
+
+- Per-run summaries: `outputs/run_*/outer_loop_final_summary.json`
+- Per-candidate metrics: `outputs/run_*/round_*/r*_c*/metrics.json`
+- Candidate training detail: `outputs/run_*/round_*/r*_c*/training_result.json`
+
+## Repository status
+
+This repository is cleaned to keep only the RL+LLM tri-layer recovery mainline modules and minimal supporting files.
 
 Optional real DeepSeek:
 ```bash

@@ -136,7 +136,7 @@ class ProjectRecoveryEnv(gym.Env):
         s[23] = 0.0
 
         self.state = self._clip01(s)
-        return self.state.copy(), self._build_info(progress_delta=0.0, invalid_action=False, mes_used=False)
+        return self.state.copy(), self._build_info(progress_delta=0.0, invalid_action=False, invalid_reason="", mes_used=False)
 
     def step(self, action: int):
         action = int(action)
@@ -158,6 +158,7 @@ class ProjectRecoveryEnv(gym.Env):
         repeated_category = action_category == self.prev_action_category
 
         invalid_action = False
+        invalid_reason = ""
         mes_used = False
 
         def zone_eff(z: int) -> float:
@@ -200,6 +201,7 @@ class ProjectRecoveryEnv(gym.Env):
             mes_used = True
             if R[z] < 0.25 or mes_soc < 0.08:
                 invalid_action = True
+                invalid_reason = "mes_unreachable_or_low_soc"
                 material -= 0.01
             else:
                 mes_loc = z
@@ -213,6 +215,7 @@ class ProjectRecoveryEnv(gym.Env):
             coord_eff = 0.5 + 0.5 * C0
             if C0 < 0.30:
                 invalid_action = True
+                invalid_reason = "low_backbone_comm_for_feeder"
             repeat_factor = 0.90 if repeated_category else 1.0
             transfer = 0.04 * switch_cap * coord_eff * repeat_factor
             weakest = int(np.argmin(L))
@@ -276,10 +279,12 @@ class ProjectRecoveryEnv(gym.Env):
         resource_shortage = material < 0.10
         if resource_shortage:
             invalid_action = True
+            invalid_reason = "material_shortage"
 
         # late stage stabilization bonus/penalty logic (simple)
         if stage_name == "late" and action in (0, 1, 2):
             invalid_action = True
+            invalid_reason = "late_stage_road_action_penalty"
 
         # write back + clamp
         s[0:3], s[3:6], s[6:9], s[9:12] = P, C, R, L
@@ -329,10 +334,10 @@ class ProjectRecoveryEnv(gym.Env):
         terminated = bool(np.mean(s[9:12]) >= 0.92 and progress_now >= 0.90)
         truncated = self.step_count >= self.max_steps
 
-        info = self._build_info(progress_delta=progress_delta, invalid_action=invalid_action, mes_used=mes_used)
+        info = self._build_info(progress_delta=progress_delta, invalid_action=invalid_action, invalid_reason=invalid_reason, mes_used=mes_used)
         return self.state.copy(), float(reward), terminated, truncated, info
 
-    def _build_info(self, progress_delta: float, invalid_action: bool, mes_used: bool) -> dict[str, Any]:
+    def _build_info(self, progress_delta: float, invalid_action: bool, invalid_reason: str, mes_used: bool) -> dict[str, Any]:
         s = self.state
         stage_val, stage_name = self._stage(s)
         weakest_zone = int(np.argmin((s[0:3] + s[3:6] + s[6:9]) / 3.0))
@@ -341,6 +346,7 @@ class ProjectRecoveryEnv(gym.Env):
         return {
             "progress_delta": float(progress_delta),
             "invalid_action": bool(invalid_action),
+            "invalid_reason": str(invalid_reason),
             "mes_used": bool(mes_used),
             "stage": stage_name,
             "stage_indicator": float(stage_val),

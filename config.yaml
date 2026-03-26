@@ -54,7 +54,7 @@ selection:
     road_opening_priority:
       road_recovery_ratio: 0.45
       success_rate: 0.2
-      constraint_violation_count: -0.15
+      constraint_violation_rate_eval: -0.15
       cumulative_reward_mean: 0.2
     critical_power_priority:
       power_recovery_ratio: 0.5
@@ -64,7 +64,7 @@ selection:
       communication_recovery_ratio: 0.5
       backbone_comm_ratio: 0.25
       success_rate: 0.2
-      constraint_violation_count: -0.1
+      constraint_violation_rate_eval: -0.1
     coordinated_restoration:
       success_rate: 0.35
       communication_recovery_ratio: 0.2
@@ -73,7 +73,7 @@ selection:
       critical_load_recovery_ratio: 0.1
     stabilization_priority:
       success_rate: 0.25
-      constraint_violation_count: -0.45
+      constraint_violation_rate_eval: -0.45
       cumulative_reward_mean: 0.2
       critical_load_recovery_ratio: 0.1
 

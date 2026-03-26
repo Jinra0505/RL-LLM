@@ -379,6 +379,11 @@ def main() -> None:
                 )
                 record["metrics"] = metrics
                 record["candidate_path"] = str(candidate_path)
+                record["task_mode"] = route["task_mode"]
+                record["route_source"] = str(routing_context.get("trajectory_summary", {}).get("source", "unknown"))
+                record["selection_score"] = float(metrics.get("selection_score", 0.0))
+                record["representative_eval_summary"] = dict(metrics.get("representative_eval_summary", {}))
+                (cdir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
             else:
                 record["metrics"] = {"selection_score": -1e9 if higher_is_better else 1e9, "success_rate": 0.0}
                 record["error"] = "Validation failed"

@@ -41,6 +41,7 @@ def route_rule(routing_context: dict[str, Any]) -> dict[str, Any]:
     power = float(env.get("power_recovery_ratio", 0.0))
     road = float(env.get("road_recovery_ratio", 0.0))
     shortfall = float(env.get("critical_load_shortfall", 1.0))
+    backbone_comm = float(env.get("backbone_comm_ratio", comm))
     weakest_zone = str(env.get("weakest_zone", "A"))
     weakest_layer_idx = str(env.get("weakest_layer", "0"))
 
@@ -56,7 +57,7 @@ def route_rule(routing_context: dict[str, Any]) -> dict[str, Any]:
     if shortfall > 0.35 or weakest_layer_idx == "0":
         return {"task_mode": "critical_power_priority", "confidence": 0.84, "reason": "Critical-load shortfall/high power weakness.", "stage": stage}
 
-    if weakest_layer_idx == "1" and comm < 0.65:
+    if weakest_layer_idx == "1" and min(comm, backbone_comm) < 0.65:
         return {"task_mode": "backbone_comm_priority", "confidence": 0.8, "reason": "Communication layer is weakest.", "stage": stage}
 
     if stage == "middle":

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import logging
 import random
+from collections import Counter
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -269,6 +270,10 @@ def run_training(
     eval_terminated_count = 0
     eval_truncated_count = 0
     eval_action_usage = {str(i): 0 for i in range(action_dim)}
+    eval_stage_counts: Counter[str] = Counter()
+    eval_invalid_reason_counts: Counter[str] = Counter()
+    representative_eval_trace: list[dict[str, Any]] = []
+    representative_eval_summary: dict[str, Any] = {}
 
     for ep in range(eval_episodes):
         s, info = env.reset(seed=seed + 1000 + ep)
@@ -281,7 +286,8 @@ def run_training(
         ep_mes_moves = 0
         terminated = False
         truncated = False
-        for _ in range(max_steps_per_episode):
+        episode_trace: list[dict[str, Any]] = []
+        for step_idx in range(max_steps_per_episode):
             rs = _effective_state(_call_revise(revise_state_fn, s, info), max_revised_dim)
             with torch.no_grad():
                 qvals = q_net(torch.tensor(rs, dtype=torch.float32).unsqueeze(0))
@@ -292,10 +298,25 @@ def run_training(
             ep_steps += 1
             ep_invalid += int(bool(info.get("invalid_action", False)))
             ep_violate += int(bool(info.get("constraint_violation", False)))
+            if info.get("invalid_action", False):
+                eval_invalid_reason_counts[str(info.get("invalid_reason", "unknown"))] += 1
             ep_progress.append(float(info.get("progress_delta", 0.0)))
             ep_stage.append(float(info.get("stage_indicator", 0.0)))
+            eval_stage_counts[str(info.get("stage", "unknown"))] += 1
             if a in {9, 10, 11}:
                 ep_mes_moves += 1
+            if ep == 0 and step_idx < 12:
+                episode_trace.append(
+                    {
+                        "step": step_idx,
+                        "action": a,
+                        "progress_delta": float(info.get("progress_delta", 0.0)),
+                        "stage": str(info.get("stage", "unknown")),
+                        "invalid_action": bool(info.get("invalid_action", False)),
+                        "invalid_reason": str(info.get("invalid_reason", "")),
+                        "constraint_violation": bool(info.get("constraint_violation", False)),
+                    }
+                )
             s = ns
             if terminated or truncated:
                 break
@@ -334,6 +355,16 @@ def run_training(
         eval_zone_A_load.append(float(info.get("zone_A_critical_load_ratio", 0.0)))
         eval_zone_B_load.append(float(info.get("zone_B_critical_load_ratio", 0.0)))
         eval_zone_C_load.append(float(info.get("zone_C_critical_load_ratio", 0.0)))
+        if ep == 0:
+            representative_eval_trace = episode_trace
+            representative_eval_summary = {
+                "steps": ep_steps,
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "final_stage": str(info.get("stage", "unknown")),
+                "final_progress_delta": float(info.get("progress_delta", 0.0)),
+                "final_critical_load_shortfall": float(info.get("critical_load_shortfall", 1.0)),
+            }
 
     total_actions = max(1, sum(action_usage.values()))
     action_usage_norm = {k: v / total_actions for k, v in action_usage.items()}
@@ -350,24 +381,34 @@ def run_training(
         "power_recovery_ratio": float(np.mean(power_scores)) if power_scores else 0.0,
         "road_recovery_ratio": float(np.mean(road_scores)) if road_scores else 0.0,
         "critical_load_recovery_ratio": float(np.mean(crit_scores)) if crit_scores else 0.0,
+        "critical_load_shortfall": float(max(0.0, 1.0 - (float(np.mean(crit_scores)) if crit_scores else 0.0))),
         "recovery_completion_time": float(np.mean(completion_steps)) if completion_steps else float(max_steps_per_episode),
         "cumulative_reward_mean": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
         "constraint_violation_count": int(violations),
         "constraint_violation_rate": float(np.mean(eval_violation_rates)) if eval_violation_rates else 0.0,
+        "constraint_violation_rate_eval": float(np.mean(eval_violation_rates)) if eval_violation_rates else 0.0,
         "train_constraint_violation_rate": float(violations) / float(max(1, train_total_steps)),
         "invalid_action_rate": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
+        "invalid_action_rate_eval": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
         "mean_progress_delta_eval": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
         "mean_stage_indicator_eval": float(np.mean(eval_stage_indicators)) if eval_stage_indicators else 0.0,
         "backbone_comm_ratio": float(np.mean(eval_backbone_comm)) if eval_backbone_comm else 0.0,
         "backbone_power_ratio": float(np.mean(eval_backbone_power)) if eval_backbone_power else 0.0,
         "backbone_road_ratio": float(np.mean(eval_backbone_road)) if eval_backbone_road else 0.0,
         "mes_usage_rate": float(np.mean(eval_mes_usage_rates)) if eval_mes_usage_rates else 0.0,
+        "mes_usage_rate_eval": float(np.mean(eval_mes_usage_rates)) if eval_mes_usage_rates else 0.0,
         "mes_soc_mean_end": float(np.mean(eval_mes_soc_end)) if eval_mes_soc_end else 0.0,
+        "mes_soc_end_mean": float(np.mean(eval_mes_soc_end)) if eval_mes_soc_end else 0.0,
         "material_stock_mean_end": float(np.mean(eval_material_end)) if eval_material_end else 0.0,
+        "material_stock_end_mean": float(np.mean(eval_material_end)) if eval_material_end else 0.0,
         "switching_capability_mean_end": float(np.mean(eval_switching_end)) if eval_switching_end else 0.0,
+        "switching_capability_end_mean": float(np.mean(eval_switching_end)) if eval_switching_end else 0.0,
         "crew_power_status_mean_end": float(np.mean(eval_crew_power_end)) if eval_crew_power_end else 0.0,
+        "crew_power_status_end_mean": float(np.mean(eval_crew_power_end)) if eval_crew_power_end else 0.0,
         "crew_comm_status_mean_end": float(np.mean(eval_crew_comm_end)) if eval_crew_comm_end else 0.0,
+        "crew_comm_status_end_mean": float(np.mean(eval_crew_comm_end)) if eval_crew_comm_end else 0.0,
         "crew_road_status_mean_end": float(np.mean(eval_crew_road_end)) if eval_crew_road_end else 0.0,
+        "crew_road_status_end_mean": float(np.mean(eval_crew_road_end)) if eval_crew_road_end else 0.0,
         "zone_A_power_ratio": float(np.mean(eval_zone_A_power)) if eval_zone_A_power else 0.0,
         "zone_B_power_ratio": float(np.mean(eval_zone_B_power)) if eval_zone_B_power else 0.0,
         "zone_C_power_ratio": float(np.mean(eval_zone_C_power)) if eval_zone_C_power else 0.0,
@@ -389,6 +430,12 @@ def run_training(
         "action_usage": action_usage_norm,
         "action_category_usage": action_category_usage,
         "dominant_action_category": dominant_action_category,
+        "stage_distribution_eval": {
+            k: v / float(max(1, sum(eval_stage_counts.values()))) for k, v in eval_stage_counts.items()
+        },
+        "invalid_reason_counts_eval": dict(eval_invalid_reason_counts),
+        "representative_eval_trace": representative_eval_trace,
+        "representative_eval_summary": representative_eval_summary,
         "eval_trajectory_summary": {
             "mean_steps": float(np.mean(eval_steps_per_episode)) if eval_steps_per_episode else 0.0,
             "terminated_rate": eval_terminated_count / float(max(1, eval_episodes)),

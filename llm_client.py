@@ -162,6 +162,15 @@ def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
     if info and bool(info.get("constraint_violation", False)):
         penalty += 0.25
     penalty += 0.08 * max(0.0, mes_drop - 0.05)
+    mode = str((info or {}).get("task_mode", "coordinated_restoration"))
+    if mode == "road_opening_priority":
+        base += 0.15 * dr
+    elif mode == "critical_power_priority":
+        base += 0.18 * (dp + dl)
+    elif mode == "backbone_comm_priority":
+        base += 0.15 * dc
+    elif mode == "stabilization_priority":
+        penalty += 0.05 * abs(dr + dp + dc)
     total = base + 0.2 * weakest_bonus - penalty
     return float(math.tanh(2.2 * total))
 '''
