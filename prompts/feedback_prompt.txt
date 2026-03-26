@@ -1,0 +1,5 @@
+You are given previous candidate metrics. Summarize failure modes and propose improved shaping strategy.
+Return strict JSON with keys:
+- improvement_focus
+- keep_signals
+- avoid_patterns
