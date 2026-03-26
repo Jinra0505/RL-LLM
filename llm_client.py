@@ -49,6 +49,18 @@ class LLMClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.splitlines()
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                cleaned = "\n".join(lines).strip()
+                try:
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    pass
             start = raw.find("{")
             end = raw.rfind("}")
             if start != -1 and end != -1 and end > start:
@@ -184,7 +196,12 @@ def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
         )
 
     def _real_chat(self, messages: list[dict[str, str]]) -> str:
-        from openai import OpenAI
+        try:
+            from openai import OpenAI
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "missing openai dependency: install requirements.txt (or `pip install openai>=1.30.0`) to use --llm-mode real."
+            ) from exc
 
         client = OpenAI(api_key=self.api_key, base_url=f"{self.base_url.rstrip('/')}/v1", timeout=self.timeout_seconds)
         last_exc: Exception | None = None

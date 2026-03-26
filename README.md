@@ -117,6 +117,8 @@ Optional real DeepSeek:
 ```bash
 export DEEPSEEK_API_KEY=your_real_key
 export DEEPSEEK_BASE_URL=https://api.deepseek.com
-export DEEPSEEK_MODEL=deepseek-chat
+export DEEPSEEK_MODEL_CHAT=deepseek-chat
+# llm_client.py reads DEEPSEEK_MODEL; map from *_CHAT if needed
+export DEEPSEEK_MODEL="${DEEPSEEK_MODEL_CHAT}"
 python run_outer_loop.py --env project_recovery --llm-mode real
 ```
