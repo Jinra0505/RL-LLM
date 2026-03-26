@@ -28,7 +28,9 @@ class LLMClient:
 
         self.api_key = os.getenv("DEEPSEEK_API_KEY")
         self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        legacy_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.chat_model = os.getenv("DEEPSEEK_MODEL_CHAT", legacy_model)
+        self.reasoner_model = os.getenv("DEEPSEEK_MODEL_REASONER", self.chat_model)
 
         if self.mode == "real" and not self.api_key:
             raise RuntimeError("--llm-mode real selected but DEEPSEEK_API_KEY is not set.")
@@ -42,7 +44,7 @@ class LLMClient:
     def chat(self, messages: list[dict[str, str]], response_kind: str = "chat", sample_idx: int = 0) -> str:
         if self.using_mock:
             return self._mock_response(response_kind=response_kind, sample_idx=sample_idx)
-        return self._real_chat(messages)
+        return self._real_chat(messages, response_kind=response_kind)
 
     def chat_json(self, messages: list[dict[str, str]], response_kind: str = "chat", sample_idx: int = 0) -> dict[str, Any]:
         raw = self.chat(messages, response_kind=response_kind, sample_idx=sample_idx)
@@ -195,7 +197,16 @@ def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
             }
         )
 
-    def _real_chat(self, messages: list[dict[str, str]]) -> str:
+    def _normalize_base_url(self) -> str:
+        base = self.base_url.rstrip("/")
+        return base if base.endswith("/v1") else f"{base}/v1"
+
+    def _select_model(self, response_kind: str) -> str:
+        if response_kind in {"router", "feedback"}:
+            return self.reasoner_model or self.chat_model
+        return self.chat_model
+
+    def _real_chat(self, messages: list[dict[str, str]], response_kind: str = "chat") -> str:
         try:
             from openai import OpenAI
         except ModuleNotFoundError as exc:
@@ -203,12 +214,13 @@ def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
                 "missing openai dependency: install requirements.txt (or `pip install openai>=1.30.0`) to use --llm-mode real."
             ) from exc
 
-        client = OpenAI(api_key=self.api_key, base_url=f"{self.base_url.rstrip('/')}/v1", timeout=self.timeout_seconds)
+        client = OpenAI(api_key=self.api_key, base_url=self._normalize_base_url(), timeout=self.timeout_seconds)
+        model = self._select_model(response_kind=response_kind)
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 resp = client.chat.completions.create(
-                    model=self.model,
+                    model=model,
                     messages=messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,

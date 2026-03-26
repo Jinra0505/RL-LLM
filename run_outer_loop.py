@@ -5,6 +5,7 @@ import ast
 import importlib.util
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -307,6 +308,14 @@ def main() -> None:
     generated_dir.mkdir(parents=True, exist_ok=True)
     outputs_root.mkdir(parents=True, exist_ok=True)
 
+    llm_cfg = cfg.get("llm", {})
+    if llm_cfg.get("model_chat") and not os.getenv("DEEPSEEK_MODEL_CHAT"):
+        os.environ["DEEPSEEK_MODEL_CHAT"] = str(llm_cfg["model_chat"])
+    if llm_cfg.get("model_reasoner") and not os.getenv("DEEPSEEK_MODEL_REASONER"):
+        os.environ["DEEPSEEK_MODEL_REASONER"] = str(llm_cfg["model_reasoner"])
+    if llm_cfg.get("base_url") and not os.getenv("DEEPSEEK_BASE_URL"):
+        os.environ["DEEPSEEK_BASE_URL"] = str(llm_cfg["base_url"])
+
     client = LLMClient(
         mode=args.llm_mode,
         timeout_seconds=int(cfg["llm"]["timeout_seconds"]),
@@ -356,11 +365,27 @@ def main() -> None:
             prompt += "\n\nReturn compact JSON and keep generated code concise (<= 80 lines)."
             if history:
                 prompt += "\n\nLatest feedback:\n" + json.dumps(history[-1].get("feedback_payload", {}), indent=2)
-
-            raw = client.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}], response_kind="codegen", sample_idx=sample_idx + round_idx * 10)
-            parsed, repaired = parse_json_with_repair(raw)
-            report = validate_candidate_payload(parsed)
-            report["repaired_from_raw"] = repaired
+            raw = "{}"
+            parsed: dict[str, Any] = {}
+            repaired = True
+            report: dict[str, Any] = {"valid": False, "errors": ["not attempted"], "normalized_payload": {}}
+            for attempt in range(2):
+                attempt_prompt = prompt
+                if attempt > 0:
+                    attempt_prompt += (
+                        "\n\nPrevious output was invalid. Respond with ONLY one JSON object with keys: "
+                        "file_name, rationale, code, expected_behavior."
+                    )
+                raw = client.chat(
+                    [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": attempt_prompt}],
+                    response_kind="codegen",
+                    sample_idx=sample_idx + round_idx * 10 + attempt,
+                )
+                parsed, repaired = parse_json_with_repair(raw)
+                report = validate_candidate_payload(parsed)
+                report["repaired_from_raw"] = repaired
+                if report["valid"]:
+                    break
 
             (cdir / "prompt.txt").write_text(prompt, encoding="utf-8")
             (cdir / "raw_response.txt").write_text(raw, encoding="utf-8")
