@@ -1,0 +1,38 @@
+env_name: mock_recovery
+observation_fields:
+  - name: communication_recovery_level
+    index: 0
+    range: [0.0, 1.0]
+  - name: critical_load_recovery_level
+    index: 1
+    range: [0.0, 1.0]
+  - name: transportation_accessibility
+    index: 2
+    range: [0.0, 1.0]
+  - name: available_repair_resources
+    index: 3
+    range: [0.0, 1.0]
+  - name: mobile_energy_storage_state
+    index: 4
+    range: [0.0, 1.0]
+  - name: stage_indicator
+    index: 5
+    range: [0.0, 2.0]
+  - name: constraint_flag
+    index: 6
+    range: [0.0, 1.0]
+
+action_space:
+  type: discrete
+  n: 4
+  semantics:
+    0: focus_communication
+    1: focus_critical_load
+    2: focus_transport
+    3: balance_all
+
+training_defaults:
+  train_episodes: 20
+  eval_episodes: 8
+  max_steps_per_episode: 40
+  gamma: 0.95

@@ -1,0 +1,8 @@
+Classify the current recovery context into one task mode:
+- communication_priority
+- critical_load_priority
+- system_recovery_priority
+- stabilization_priority
+
+Return strict JSON:
+{"task_mode": "...", "confidence": 0.0-1.0, "reason": "...", "stage": "early_recovery|mid_recovery|late_recovery"}
