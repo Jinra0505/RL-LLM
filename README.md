@@ -79,6 +79,11 @@ Install:
 pip install -r requirements.txt
 ```
 
+LLM modes:
+- `--llm-mode mock`: force deterministic local mock responses (no API call)
+- `--llm-mode real`: force real DeepSeek API calls (requires API key)
+- `--llm-mode auto`: real if key is present, otherwise mock
+
 ### Experiment 1: baseline_noop vs RL+LLM
 
 Baseline (no-op shaping):
@@ -89,6 +94,11 @@ python train_rl.py --env project_recovery --llm-mode mock --task-mode coordinate
 RL+LLM outer loop:
 ```bash
 python run_outer_loop.py --env project_recovery --llm-mode mock
+```
+
+Baseline (no LLM shaping, trainer compatibility check):
+```bash
+python train_rl.py --env project_recovery --llm-mode real --task-mode coordinated_restoration --revise-module baseline_noop.py --output outputs/exp1_baseline_realcheck.json
 ```
 
 ### Experiment 3: severity / task-mode comparison
@@ -108,6 +118,10 @@ python run_outer_loop.py --env project_recovery --llm-mode mock --fixed-task-mod
 - Per-run summaries: `outputs/run_*/outer_loop_final_summary.json`
 - Per-candidate metrics: `outputs/run_*/round_*/r*_c*/metrics.json`
 - Candidate training detail: `outputs/run_*/round_*/r*_c*/training_result.json`
+- Formal checked artifacts used in this repo:
+  - baseline: `outputs/exp1_baseline_realcheck.json`
+  - real outer-loop: `outputs/real_outer_loop_smoke/`
+- Debug connectivity/SDK checks are kept under: `outputs/debug_checks/`
 
 ## Repository status
 
@@ -117,6 +131,12 @@ Optional real DeepSeek:
 ```bash
 export DEEPSEEK_API_KEY=your_real_key
 export DEEPSEEK_BASE_URL=https://api.deepseek.com
-export DEEPSEEK_MODEL=deepseek-chat
+export DEEPSEEK_MODEL_CHAT=deepseek-chat
+export DEEPSEEK_MODEL_REASONER=deepseek-reasoner
 python run_outer_loop.py --env project_recovery --llm-mode real
 ```
+
+`llm_client.py` model routing:
+- `response_kind=chat` -> `DEEPSEEK_MODEL_CHAT`
+- `response_kind in {router, feedback}` -> `DEEPSEEK_MODEL_REASONER` (fallback to chat model)
+- `response_kind=codegen` -> `DEEPSEEK_MODEL_CHAT` (for higher code JSON completion stability)

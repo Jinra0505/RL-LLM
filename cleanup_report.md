@@ -1,13 +1,9 @@
 # Cleanup Report
 
-## Removed files/directories
-- `.gitkeep` (repository-root placeholder only, not used by the pipeline).
+## Purpose
+Keep runtime artifacts organized so formal experiment outputs are not mixed with ad-hoc connectivity/debug checks.
 
-## Why removed
-- Not referenced by imports, config, or entrypoints.
-- Kept repository focused on RL+LLM tri-layer recovery mainline.
-
-## Core modules retained
+## Core source files (kept)
 - `config.yaml`
 - `mock_recovery_env.py`
 - `train_rl.py`
@@ -18,7 +14,19 @@
 - `baseline_noop.py`
 - `requirements.txt`
 - `README.md`
-- `.env.example`
-- `.gitignore`
 - `AGENTS.md`
-- `generated/.gitkeep`, `outputs/.gitkeep` (runtime output dirs)
+
+## Formal experiment outputs (kept under `outputs/`)
+- `outputs/exp1_baseline_realcheck.json`
+- `outputs/real_outer_loop_smoke/outer_loop_final_summary.json`
+- `outputs/real_outer_loop_smoke/round_1/summary.json`
+- `outputs/real_outer_loop_smoke/round_1/r1_c1/metrics.json`
+- `outputs/real_outer_loop_smoke/round_1/r1_c2/metrics.json`
+
+## Debug/check artifacts (moved)
+Moved into `outputs/debug_checks/`:
+- `python_sdk_check.json`
+- `python_real_api_check.json`
+- `real_api_post_check.json`
+- `real_api_router_smoke_test.json`
+- `real_api_codegen_smoke_test.json`
