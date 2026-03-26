@@ -157,8 +157,7 @@ def main() -> None:
     cfg = load_yaml(Path(args.config))
     rounds = args.rounds_override or int(cfg["outer_loop"]["rounds"])
     candidates_per_round = int(cfg["outer_loop"]["candidates_per_round"])
-    score_metric = str(cfg["selection"]["score_metric"])
-    higher_is_better = bool(cfg["selection"]["higher_is_better"])
+    higher_is_better = bool(cfg["selection"].get("higher_is_better", True))
 
     generated_dir = Path(cfg["paths"]["generated_dir"])
     outputs_root = Path(cfg["paths"]["outputs_dir"])
@@ -255,21 +254,23 @@ def main() -> None:
                     llm_mode="mock" if client.using_mock else "real",
                     output_json_path=cdir / "training_result.json",
                     seed=42 + round_idx * 10 + sample_idx,
+                    max_revised_dim=(int(cfg.get("state_representation", {}).get("max_revised_dim")) if cfg.get("state_representation", {}).get("max_revised_dim") is not None else None),
+                    task_mode_metric_weights=cfg.get("selection", {}).get("task_mode_metric_weights", {}),
                 )
                 record["metrics"] = metrics
                 record["candidate_path"] = str(candidate_path)
             else:
-                record["metrics"] = {score_metric: -1e9 if higher_is_better else 1e9, "success_rate": 0.0, "constraint_violation_count": 0}
+                record["metrics"] = {"selection_score": -1e9 if higher_is_better else 1e9, "success_rate": 0.0, "constraint_violation_count": 0}
                 record["error"] = "Validation failed, skipped training"
 
             (cdir / "candidate_record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             round_candidates.append(record)
 
         best_metric_values = [c["metrics"] for c in round_candidates]
-        best_metrics = select_best(best_metric_values, score_metric, higher_is_better)
+        best_metrics = select_best(best_metric_values, "selection_score", higher_is_better)
         best_candidate = next(c for c in round_candidates if c["metrics"] is best_metrics)
 
-        feedback_payload = build_feedback(best_candidate, score_metric)
+        feedback_payload = build_feedback(best_candidate, "selection_score")
         feedback_messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": FEEDBACK_PROMPT + "\n\n" + json.dumps(feedback_payload, indent=2)}]
         feedback_raw = client.chat(feedback_messages, response_kind="feedback")
         feedback_json, _ = parse_json_with_repair(feedback_raw)
@@ -277,8 +278,8 @@ def main() -> None:
         summary = {
             "round": round_idx + 1,
             "route": route,
-            "best_metric": score_metric,
-            "best_value": best_candidate["metrics"].get(score_metric),
+            "best_metric": "selection_score",
+            "best_value": best_candidate["metrics"].get("selection_score"),
             "best_candidate": best_candidate,
             "feedback_payload": feedback_payload,
             "llm_feedback": feedback_json,

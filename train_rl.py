@@ -35,9 +35,10 @@ def load_revise_functions(module_path: Path) -> tuple[Callable[..., np.ndarray],
 
 def _call_revise(fn: Callable[..., Any], state: np.ndarray, info: dict[str, Any]) -> np.ndarray:
     try:
-        return np.asarray(fn(state, info), dtype=float)
+        arr = np.asarray(fn(state, info), dtype=float)
     except TypeError:
-        return np.asarray(fn(state), dtype=float)
+        arr = np.asarray(fn(state), dtype=float)
+    return np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
 
 
 def _call_intrinsic(
@@ -57,6 +58,26 @@ def _call_intrinsic(
             return float(fn(next_state))
 
 
+def _effective_state(revised_state: np.ndarray, max_revised_dim: int | None) -> np.ndarray:
+    """Policy features are based on revised_state, not raw state.
+
+    If max_revised_dim is None, all revised dimensions are used (default).
+    """
+    if max_revised_dim is None:
+        return revised_state
+    return revised_state[:max_revised_dim]
+
+
+def _weighted_mode_score(metrics: dict[str, Any], task_mode: str, weights_cfg: dict[str, Any]) -> float:
+    weights = dict(weights_cfg.get(task_mode, {}))
+    if not weights:
+        return float(metrics.get("success_rate", 0.0))
+    score = 0.0
+    for metric, w in weights.items():
+        score += float(w) * float(metrics.get(metric, 0.0))
+    return float(score)
+
+
 def run_training(
     revise_module_path: Path | None,
     env_name: str,
@@ -68,6 +89,8 @@ def run_training(
     llm_mode: str,
     output_json_path: Path,
     seed: int = 42,
+    max_revised_dim: int | None = None,
+    task_mode_metric_weights: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if env_name != "mock_recovery":
         raise ValueError("This minimal prototype supports only env_name=mock_recovery")
@@ -81,7 +104,7 @@ def run_training(
     action_usage: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
 
     def key_fn(x: np.ndarray) -> tuple[int, ...]:
-        x = np.clip(np.asarray(x, dtype=float), 0.0, 1.0)
+        x = np.clip(np.asarray(x, dtype=float), -5.0, 5.0)
         return tuple((x * 5).astype(int).tolist())
 
     episode_rewards: list[float] = []
@@ -103,20 +126,21 @@ def run_training(
         ep_reward = 0.0
         for step in range(max_steps_per_episode):
             rs = _call_revise(revise_state, state, info)
-            k = key_fn(rs[:7])
+            policy_state = _effective_state(rs, max_revised_dim)
+            k = key_fn(policy_state)
             if k not in q_table:
                 q_table[k] = np.zeros(4, dtype=float)
-            if np.random.rand() < epsilon:
-                action = int(np.random.randint(0, 4))
-            else:
-                action = int(np.argmax(q_table[k]))
+
+            action = int(np.random.randint(0, 4)) if np.random.rand() < epsilon else int(np.argmax(q_table[k]))
             action_usage[action] += 1
 
             next_state, env_reward, terminated, truncated, info = env.step(action)
             shaped = _call_intrinsic(intrinsic_reward, state, action, next_state, info, rs)
             reward = float(env_reward + shaped)
+
             next_rs = _call_revise(revise_state, next_state, info)
-            nk = key_fn(next_rs[:7])
+            next_policy_state = _effective_state(next_rs, max_revised_dim)
+            nk = key_fn(next_policy_state)
             if nk not in q_table:
                 q_table[nk] = np.zeros(4, dtype=float)
 
@@ -147,7 +171,8 @@ def run_training(
         total = 0.0
         for _ in range(max_steps_per_episode):
             rs = _call_revise(revise_state, state, info)
-            k = key_fn(rs[:7])
+            policy_state = _effective_state(rs, max_revised_dim)
+            k = key_fn(policy_state)
             if k not in q_table:
                 q_table[k] = np.zeros(4, dtype=float)
             action = int(np.argmax(q_table[k]))
@@ -179,8 +204,13 @@ def run_training(
         "llm_mode_used": llm_mode,
         "revise_module_path": str(revise_module_path),
         "env_name": env_name,
+        "policy_feature_dim_used": int(_effective_state(_call_revise(revise_state, np.zeros(7), {}), max_revised_dim).shape[0]),
         "action_usage": {str(k): v / total_actions for k, v in action_usage.items()},
     }
+
+    weights_cfg = task_mode_metric_weights or {}
+    result["selection_score"] = _weighted_mode_score(result, task_mode=task_mode, weights_cfg=weights_cfg)
+    result["selection_metric_used"] = f"weighted_score::{task_mode}"
 
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
     output_json_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -201,7 +231,10 @@ def main() -> None:
 
     cfg = load_yaml(Path(args.config))
     tr = cfg["training"]
+    max_dim = cfg.get("state_representation", {}).get("max_revised_dim", None)
+    weights = cfg.get("selection", {}).get("task_mode_metric_weights", {})
     revise_module_path = Path(args.revise_module) if args.revise_module else None
+
     run_training(
         revise_module_path=revise_module_path,
         env_name=args.env,
@@ -212,6 +245,8 @@ def main() -> None:
         task_mode=args.task_mode,
         llm_mode=args.llm_mode,
         output_json_path=Path(args.output),
+        max_revised_dim=int(max_dim) if max_dim is not None else None,
+        task_mode_metric_weights=weights,
     )
 
 

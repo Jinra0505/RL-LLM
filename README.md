@@ -1,23 +1,25 @@
 # RL-LLM Minimal Prototype
 
-This repository is intentionally kept small.
+This repository is intentionally small and keeps one main pipeline:
 
-Core workflow:
+`run_outer_loop.py -> router.py -> llm_client.py -> generated candidate -> train_rl.py -> outputs/`
 
-`outer loop -> router -> LLM/mock code generation -> generated revise/reward module -> RL training -> outputs`
+## File layout
 
-## Minimal file layout
-
-- `run_outer_loop.py` : main outer loop
-- `train_rl.py` : RL training entrypoint
-- `llm_client.py` : DeepSeek (real) + mock client in one file
-- `router.py` : trajectory summary + rule/LLM routing in one file
-- `mock_recovery_env.py` : runnable Gymnasium mock environment
+- `run_outer_loop.py` : outer-loop orchestration (routing, codegen, validation, selection, feedback)
+- `train_rl.py` : RL training/evaluation with dynamic candidate import
+- `llm_client.py` : DeepSeek real mode + mock fallback
+- `router.py` : trajectory summarization + rule/LLM routing
+- `mock_recovery_env.py` : stage-aware mock environment
 - `prompts.py` : prompt strings
-- `config.yaml` : single config file
-- `baseline_noop.py` : fallback revise/reward module
-- `generated/` : generated candidate modules
-- `outputs/` : run outputs and artifacts
+- `config.yaml` : all runtime config (llm/training/selection/task modes)
+- `baseline_noop.py` : fallback revise/reward
+
+## Key behavior
+
+1. Generated code is validated before training (`run_outer_loop.py`).
+2. Policy learning uses **revised_state features** directly (not raw-state-only), with optional cap via `state_representation.max_revised_dim` in `config.yaml`.
+3. Candidate selection and evaluation summary are **task-mode-dependent** through weighted metrics in `config.yaml` (`selection.task_mode_metric_weights`).
 
 ## Install
 
@@ -25,21 +27,19 @@ Core workflow:
 pip install -r requirements.txt
 ```
 
-## Run (mock mode, no API key required)
+## Run outer loop (mock mode)
 
 ```bash
-python run_outer_loop.py --env mock_recovery --llm-mode mock --router-mode rule --rounds-override 1
+python run_outer_loop.py --env mock_recovery --llm-mode mock
 ```
 
-## Run (auto mode)
+## Run trainer directly
 
 ```bash
-python run_outer_loop.py --env mock_recovery --llm-mode auto --router-mode rule
+python train_rl.py --env mock_recovery --llm-mode mock --task-mode system_recovery_priority
 ```
 
-If `DEEPSEEK_API_KEY` is missing, auto mode uses mock mode.
-
-## Run with real DeepSeek later
+## Real DeepSeek mode later
 
 ```bash
 export DEEPSEEK_API_KEY=your_real_key
@@ -48,14 +48,8 @@ export DEEPSEEK_MODEL=deepseek-chat
 python run_outer_loop.py --env mock_recovery --llm-mode real
 ```
 
-## Run trainer directly
-
-```bash
-python train_rl.py --env mock_recovery --llm-mode mock --task-mode system_recovery_priority --output outputs/rl_result.json
-```
-
 ## Notes
 
-- Outer loop validates generated code before training (required fields, syntax, imports, function existence).
-- This prototype currently supports only `mock_recovery` environment.
-- `outputs/run_*` stores prompts, raw responses, validation reports, training results, and round summaries.
+- Mock mode works end-to-end without any API key.
+- This minimal prototype supports only `mock_recovery` environment.
+- Outputs are saved under `outputs/run_*` with prompt/response/validation/training artifacts.

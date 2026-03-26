@@ -9,8 +9,29 @@ outer_loop:
   candidates_per_round: 2
 
 selection:
-  score_metric: success_rate
   higher_is_better: true
+  task_mode_metric_weights:
+    communication_priority:
+      communication_recovery_ratio: 0.65
+      success_rate: 0.2
+      constraint_violation_count: -0.15
+    critical_load_priority:
+      critical_load_recovery_ratio: 0.65
+      success_rate: 0.2
+      constraint_violation_count: -0.15
+    system_recovery_priority:
+      success_rate: 0.45
+      communication_recovery_ratio: 0.2
+      critical_load_recovery_ratio: 0.2
+      transportation_recovery_ratio: 0.15
+    stabilization_priority:
+      success_rate: 0.25
+      constraint_violation_count: -0.55
+      mean_progress_delta: 0.2
+
+# If null, full revised_state is used for policy keys (no truncation).
+state_representation:
+  max_revised_dim: null
 
 task_modes:
   default: system_recovery_priority
