@@ -106,6 +106,29 @@ def _effective_state(revised_state: np.ndarray, max_revised_dim: int | None) -> 
     return revised_state if max_revised_dim is None else revised_state[:max_revised_dim]
 
 
+def _valid_action_mask(action_dim: int, info: dict[str, Any]) -> np.ndarray:
+    mask = np.ones(action_dim, dtype=bool)
+    stage = str(info.get("stage", "middle"))
+    mes_soc = float(info.get("mes_soc", 1.0))
+    material = float(info.get("material_stock", 1.0))
+    switching = float(info.get("switching_capability", 1.0))
+    backbone_comm = float(info.get("backbone_comm_ratio", 1.0))
+
+    if mes_soc < 0.12:
+        mask[9:12] = False
+    if material < 0.10:
+        mask[0:9] = False
+        mask[12] = False
+    if switching < 0.25 or backbone_comm < 0.25:
+        mask[12] = False
+    if stage == "late":
+        mask[0:3] = False
+    if not mask.any():
+        mask[:] = False
+        mask[13] = True
+    return mask
+
+
 def _weighted_mode_score(metrics: dict[str, Any], task_mode: str, weights_cfg: dict[str, Any]) -> float:
     weights = dict(weights_cfg.get(task_mode, {}))
     if not weights:
@@ -184,19 +207,28 @@ def run_training(
 
         for step in range(max_steps_per_episode):
             rs = _effective_state(_call_revise(revise_state_fn, s, info), max_revised_dim)
+            valid_mask = _valid_action_mask(action_dim, info)
 
             eps = eps_end + (eps_start - eps_end) * max(0.0, 1.0 - global_step / float(max(1, eps_decay_steps)))
             if random.random() < eps:
-                a = int(np.random.randint(0, action_dim))
+                valid_actions = np.where(valid_mask)[0]
+                a = int(np.random.choice(valid_actions))
             else:
                 with torch.no_grad():
                     qvals = q_net(torch.tensor(rs, dtype=torch.float32).unsqueeze(0))
-                    a = int(torch.argmax(qvals, dim=1).item())
+                    qarr = qvals.squeeze(0).cpu().numpy()
+                    qarr[~valid_mask] = -1e9
+                    a = int(np.argmax(qarr))
 
             action_usage[str(a)] += 1
             ns, ext_r, terminated, truncated, info = env.step(a)
             ir = _call_intrinsic(intrinsic_reward_fn, s, a, ns, info, rs)
-            r = float(ext_r + ir)
+            critical_gain = float(np.mean(ns[9:12] - s[9:12]))
+            progress_bonus = float(info.get("progress_delta", 0.0))
+            invalid_penalty = 0.25 if bool(info.get("invalid_action", False)) else 0.0
+            constraint_penalty = 0.35 if bool(info.get("constraint_violation", False)) else 0.0
+            completion_bonus = 1.2 if bool(terminated) else 0.0
+            r = float(ext_r + ir + 0.25 * critical_gain + 0.20 * progress_bonus + completion_bonus - invalid_penalty - constraint_penalty)
             done = bool(terminated or truncated)
 
             nrs = _effective_state(_call_revise(revise_state_fn, ns, info), max_revised_dim)
@@ -289,9 +321,12 @@ def run_training(
         episode_trace: list[dict[str, Any]] = []
         for step_idx in range(max_steps_per_episode):
             rs = _effective_state(_call_revise(revise_state_fn, s, info), max_revised_dim)
+            valid_mask = _valid_action_mask(action_dim, info)
             with torch.no_grad():
                 qvals = q_net(torch.tensor(rs, dtype=torch.float32).unsqueeze(0))
-                a = int(torch.argmax(qvals, dim=1).item())
+                qarr = qvals.squeeze(0).cpu().numpy()
+                qarr[~valid_mask] = -1e9
+                a = int(np.argmax(qarr))
             eval_action_usage[str(a)] += 1
             ns, ext_r, terminated, truncated, info = env.step(a)
             total += float(ext_r)

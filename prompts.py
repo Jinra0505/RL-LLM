@@ -20,6 +20,11 @@ Environment: zonal three-layer coupled recovery (communication, power, transport
 Observation schema summary:
 {observation_schema}
 Generate one module that improves policy state representation and intrinsic shaping for this 24D state.
+Prioritize system-level recovery over single-layer gains:
+- critical load recovery and completion progress
+- balanced tri-layer recovery across zones
+- lower invalid actions / constraint violations
+- avoid aggressive actions when prerequisites are weak (e.g., low mes_soc, low backbone_comm, low material)
 Only output code with revise_state and intrinsic_reward (no extra dependencies/modules).
 Return JSON keys: file_name, rationale, code, expected_behavior.
 """
@@ -31,6 +36,8 @@ ROUTER_PROMPT = """Select one task mode from:
 - coordinated_restoration
 - stabilization_priority
 Use stage, weakest layer, weakest zone, critical-load shortfall, backbone_comm_ratio, and violation rates.
+Do not over-prioritize communication-only gains when critical-load shortfall is high.
+Prefer critical_power_priority or coordinated_restoration when system-level completion is blocked.
 Return JSON with: task_mode, confidence, reason, stage.
 """
 
