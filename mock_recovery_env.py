@@ -67,6 +67,7 @@ class ProjectRecoveryEnv(gym.Env):
         self.step_count = 0
         self.constraint_violation_count = 0
         self.prev_action = 13
+        self.prev_action_category = "coordinated"
 
     def _severity_profile(self) -> tuple[tuple[float, float], float]:
         if self.severity == "mild":
@@ -92,6 +93,19 @@ class ProjectRecoveryEnv(gym.Env):
     def _clip01(self, arr: np.ndarray) -> np.ndarray:
         return np.clip(arr, 0.0, 1.0)
 
+    def _action_category(self, action: int) -> str:
+        if 0 <= action <= 2:
+            return "road"
+        if 3 <= action <= 5:
+            return "power"
+        if 6 <= action <= 8:
+            return "comm"
+        if 9 <= action <= 11:
+            return "mes"
+        if action == 12:
+            return "feeder"
+        return "coordinated"
+
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         _ = options
         if seed is not None:
@@ -100,6 +114,7 @@ class ProjectRecoveryEnv(gym.Env):
         self.step_count = 0
         self.constraint_violation_count = 0
         self.prev_action = 13
+        self.prev_action_category = "coordinated"
 
         rng_range, difficulty = self._severity_profile()
         low, high = rng_range
@@ -139,6 +154,8 @@ class ProjectRecoveryEnv(gym.Env):
         material = float(s[20])
         switch_cap = float(s[21])
         stage_val, stage_name = self._stage(s)
+        action_category = self._action_category(action)
+        repeated_category = action_category == self.prev_action_category
 
         invalid_action = False
         mes_used = False
@@ -149,7 +166,8 @@ class ProjectRecoveryEnv(gym.Env):
 
         if 0 <= action <= 2:  # road A/B/C
             z = action
-            gain = 0.06 * crew_r * (1.0 if stage_name != "late" else 0.75)
+            repeat_factor = 0.93 if repeated_category else 1.0
+            gain = 0.06 * crew_r * repeat_factor * (1.0 if stage_name != "late" else 0.75)
             R[z] += gain + self.rng.normal(0.0, 0.004)
             R0 += 0.02 * gain
             material -= 0.03
@@ -157,7 +175,8 @@ class ProjectRecoveryEnv(gym.Env):
         elif 3 <= action <= 5:  # power A/B/C
             z = action - 3
             eff = zone_eff(z)
-            gain = 0.055 * crew_p * eff
+            repeat_factor = 0.93 if repeated_category else 1.0
+            gain = 0.055 * crew_p * eff * repeat_factor
             if stage_name == "early":
                 gain *= 0.95
             P[z] += gain + self.rng.normal(0.0, 0.004)
@@ -170,7 +189,8 @@ class ProjectRecoveryEnv(gym.Env):
             eff = zone_eff(z)
             # comm depends on local power or MES support in-zone.
             power_support = 1.0 if (P[z] >= 0.35 or (mes_loc == z and mes_soc > 0.15)) else 0.6
-            gain = 0.055 * crew_c * eff * power_support
+            repeat_factor = 0.93 if repeated_category else 1.0
+            gain = 0.055 * crew_c * eff * power_support * repeat_factor
             C[z] += gain + self.rng.normal(0.0, 0.004)
             C0 += 0.01 * gain
             material -= 0.03
@@ -193,7 +213,8 @@ class ProjectRecoveryEnv(gym.Env):
             coord_eff = 0.5 + 0.5 * C0
             if C0 < 0.30:
                 invalid_action = True
-            transfer = 0.04 * switch_cap * coord_eff
+            repeat_factor = 0.90 if repeated_category else 1.0
+            transfer = 0.04 * switch_cap * coord_eff * repeat_factor
             weakest = int(np.argmin(L))
             donor = int(np.argmax(P))
             L[weakest] += transfer
@@ -207,6 +228,8 @@ class ProjectRecoveryEnv(gym.Env):
                 coord *= 1.08
             if stage_name == "late":
                 coord *= 1.05
+            if repeated_category:
+                coord *= 0.95
             P += 0.018 * coord * np.array([zone_eff(0), zone_eff(1), zone_eff(2)])
             C += 0.018 * coord * np.array([zone_eff(0), zone_eff(1), zone_eff(2)])
             R += 0.014 * coord
@@ -216,7 +239,38 @@ class ProjectRecoveryEnv(gym.Env):
             R0 += 0.008 * coord
             material -= 0.04
 
-        # resource dynamics
+        # lightweight resource dynamics
+        if 3 <= action <= 5:
+            crew_p -= 0.016 + (0.010 if repeated_category else 0.0)
+        else:
+            crew_p += 0.006
+        if 6 <= action <= 8:
+            crew_c -= 0.016 + (0.010 if repeated_category else 0.0)
+        else:
+            crew_c += 0.006
+        if 0 <= action <= 2:
+            crew_r -= 0.016 + (0.010 if repeated_category else 0.0)
+        else:
+            crew_r += 0.006
+
+        if action == 12:
+            switch_cap -= 0.030 + (0.010 if repeated_category else 0.0)
+        else:
+            switch_cap += 0.006
+
+        if action == 13 and repeated_category:
+            # mild coordinated overuse fatigue across multiple resources
+            crew_p -= 0.006
+            crew_c -= 0.006
+            crew_r -= 0.006
+            switch_cap -= 0.008
+
+        crew_p = float(np.clip(crew_p, 0.20, 1.0))
+        crew_c = float(np.clip(crew_c, 0.20, 1.0))
+        crew_r = float(np.clip(crew_r, 0.20, 1.0))
+        switch_cap = float(np.clip(switch_cap, 0.20, 1.0))
+
+        # resource replenishment
         material = float(np.clip(material + 0.008, 0.0, 1.0))
         mes_soc = float(np.clip(mes_soc + 0.006 if not mes_used else mes_soc, 0.0, 1.0))
         resource_shortage = material < 0.10
@@ -230,7 +284,9 @@ class ProjectRecoveryEnv(gym.Env):
         # write back + clamp
         s[0:3], s[3:6], s[6:9], s[9:12] = P, C, R, L
         s[12], s[13], s[14] = P0, C0, R0
+        s[15], s[16], s[17] = crew_p, crew_c, crew_r
         s[18], s[19], s[20] = mes_loc / 2.0, mes_soc, material
+        s[21] = switch_cap
 
         s = self._clip01(s)
         s[22], _ = self._stage(s)
@@ -263,6 +319,7 @@ class ProjectRecoveryEnv(gym.Env):
 
         self.state = s
         self.prev_action = action
+        self.prev_action_category = action_category
         self.step_count += 1
 
         progress_prev = self._progress(s_prev)
@@ -286,13 +343,34 @@ class ProjectRecoveryEnv(gym.Env):
             "invalid_action": bool(invalid_action),
             "mes_used": bool(mes_used),
             "stage": stage_name,
+            "stage_indicator": float(stage_val),
             "constraint_violation": bool(s[23] > 0.5),
             "constraint_violation_count": int(self.constraint_violation_count),
             "communication_recovery_ratio": float(np.mean(s[3:6])),
             "power_recovery_ratio": float(np.mean(s[0:3])),
             "road_recovery_ratio": float(np.mean(s[6:9])),
             "critical_load_recovery_ratio": float(np.mean(s[9:12])),
+            "backbone_power_ratio": float(s[12]),
             "backbone_comm_ratio": float(s[13]),
+            "backbone_road_ratio": float(s[14]),
+            "crew_power_status": float(s[15]),
+            "crew_comm_status": float(s[16]),
+            "crew_road_status": float(s[17]),
+            "mes_soc": float(s[19]),
+            "material_stock": float(s[20]),
+            "switching_capability": float(s[21]),
+            "zone_A_power_ratio": float(s[0]),
+            "zone_B_power_ratio": float(s[1]),
+            "zone_C_power_ratio": float(s[2]),
+            "zone_A_comm_ratio": float(s[3]),
+            "zone_B_comm_ratio": float(s[4]),
+            "zone_C_comm_ratio": float(s[5]),
+            "zone_A_road_ratio": float(s[6]),
+            "zone_B_road_ratio": float(s[7]),
+            "zone_C_road_ratio": float(s[8]),
+            "zone_A_critical_load_ratio": float(s[9]),
+            "zone_B_critical_load_ratio": float(s[10]),
+            "zone_C_critical_load_ratio": float(s[11]),
             "weakest_zone": zone_map[weakest_zone],
             "weakest_layer": str(np.argmin([np.mean(s[0:3]), np.mean(s[3:6]), np.mean(s[6:9])])),
             "critical_load_shortfall": float(1.0 - np.mean(s[9:12])),

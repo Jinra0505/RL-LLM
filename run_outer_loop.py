@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import logging
 from datetime import datetime, timezone
@@ -84,37 +85,160 @@ def validate_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {"valid": len(errors) == 0, "errors": errors, "normalized_payload": normalized}
 
 
-def collect_routing_context(env_name: str, previous_metrics: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+def _action_category(action: int) -> str:
+    if action in {0, 1, 2}:
+        return "road"
+    if action in {3, 4, 5}:
+        return "power"
+    if action in {6, 7, 8}:
+        return "comm"
+    if action in {9, 10, 11}:
+        return "mes"
+    if action == 12:
+        return "feeder"
+    return "coordinated"
+
+
+def _aggregate_action_category_distribution(action_usage: dict[str, Any]) -> dict[str, float]:
+    cats = {"road": 0.0, "power": 0.0, "comm": 0.0, "mes": 0.0, "feeder": 0.0, "coordinated": 0.0}
+    for action_str, val in action_usage.items():
+        try:
+            action = int(action_str)
+            cats[_action_category(action)] += float(val)
+        except (TypeError, ValueError):
+            continue
+    total = sum(cats.values())
+    if total > 0.0:
+        return {k: v / total for k, v in cats.items()}
+    return cats
+
+
+def _load_revise_fn(module_path: Path | None):
+    if not module_path or not module_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fn = getattr(module, "revise_state", None)
+    return fn if callable(fn) else None
+
+
+def _call_revise(fn: Any, state: Any, info: dict[str, Any]) -> Any:
+    if fn is None:
+        return state
+    try:
+        return fn(state, info)
+    except TypeError:
+        return fn(state)
+
+
+def _greedy_probe_rollout(env: ProjectRecoveryEnv, revise_fn: Any, horizon: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    state, info = env.reset(seed=101)
+    trajectory: list[dict[str, Any]] = []
+    weakest_zone_freq = {"A": 0, "B": 0, "C": 0}
+    for step_idx in range(horizon):
+        _ = _call_revise(revise_fn, state, info)
+        weakest_zone = str(info.get("weakest_zone", "A"))
+        weakest_layer = str(info.get("weakest_layer", "0"))
+        zone_to_idx = {"A": 0, "B": 1, "C": 2}
+        zone_idx = zone_to_idx.get(weakest_zone, 0)
+        weakest_zone_freq[weakest_zone] = weakest_zone_freq.get(weakest_zone, 0) + 1
+
+        if bool(info.get("constraint_violation", False)):
+            action = 13
+        elif weakest_layer == "2":
+            action = zone_idx
+        elif weakest_layer == "1":
+            action = 6 + zone_idx
+        elif weakest_layer == "0":
+            action = 3 + zone_idx
+        elif float(info.get("mes_soc", 0.0)) > 0.2 and float(info.get("critical_load_shortfall", 1.0)) > 0.3:
+            action = 9 + zone_idx
+        else:
+            action = 13
+
+        next_state, _, terminated, truncated, info = env.step(action)
+        trajectory.append({"step": step_idx, "action": action, "info": info})
+        state = next_state
+        if terminated or truncated:
+            break
+    return trajectory, weakest_zone_freq
+
+
+def collect_routing_context(
+    env_name: str,
+    previous_metrics: dict[str, Any],
+    cfg: dict[str, Any],
+    previous_best_candidate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if env_name not in {"project_recovery", "mock_recovery"}:
         raise ValueError("Supported env names: project_recovery or mock_recovery")
 
-    env = ProjectRecoveryEnv(
-        max_steps=int(cfg["env"].get("max_steps", 60)),
-        seed=101,
-        severity=str(cfg.get("scenario", {}).get("severity", "moderate")),
-        reward_weights=cfg.get("reward_weights", {}),
+    enough_previous = all(
+        k in previous_metrics
+        for k in ["communication_recovery_ratio", "power_recovery_ratio", "road_recovery_ratio", "constraint_violation_count"]
     )
-    _, info = env.reset(seed=101)
-    trajectory: list[dict[str, Any]] = []
-    for step_idx in range(12):
-        action = step_idx % int(env.action_space.n)
-        _, _, terminated, truncated, info = env.step(action)
-        trajectory.append({"step": step_idx, "action": action, "info": info})
-        if terminated or truncated:
-            break
+    if enough_previous:
+        env_summary = {
+            "communication_recovery_ratio": float(previous_metrics.get("communication_recovery_ratio", 0.0)),
+            "power_recovery_ratio": float(previous_metrics.get("power_recovery_ratio", 0.0)),
+            "road_recovery_ratio": float(previous_metrics.get("road_recovery_ratio", 0.0)),
+            "critical_load_shortfall": float(max(0.0, 1.0 - float(previous_metrics.get("critical_load_recovery_ratio", 0.0)))),
+            "backbone_comm_ratio": float(previous_metrics.get("backbone_comm_ratio", previous_metrics.get("communication_recovery_ratio", 0.0))),
+            "backbone_power_ratio": float(previous_metrics.get("backbone_power_ratio", previous_metrics.get("power_recovery_ratio", 0.0))),
+            "backbone_road_ratio": float(previous_metrics.get("backbone_road_ratio", previous_metrics.get("road_recovery_ratio", 0.0))),
+            "weakest_zone": str(previous_metrics.get("weakest_zone", "A")),
+            "weakest_layer": str(previous_metrics.get("weakest_layer", "0")),
+            "constraint_violation_count": int(previous_metrics.get("constraint_violation_count", 0)),
+        }
+        trajectory_summary = {
+            "mean_progress_delta": float(previous_metrics.get("mean_progress_delta", 0.0)),
+            "invalid_action_rate": float(previous_metrics.get("invalid_action_rate", 0.0)),
+            "constraint_violation_rate": float(previous_metrics.get("constraint_violation_rate", 0.0)),
+            "stage_distribution": dict(previous_metrics.get("stage_distribution", {})),
+            "action_category_distribution": _aggregate_action_category_distribution(dict(previous_metrics.get("action_usage", {}))),
+            "weakest_zone_frequency": dict(previous_metrics.get("weakest_zone_frequency", {})),
+            "source": "previous_metrics",
+        }
+    else:
+        env = ProjectRecoveryEnv(
+            max_steps=int(cfg["env"].get("max_steps", 60)),
+            seed=101,
+            severity=str(cfg.get("scenario", {}).get("severity", "moderate")),
+            reward_weights=cfg.get("reward_weights", {}),
+        )
+        module_path = Path(str(previous_best_candidate.get("candidate_path", ""))) if previous_best_candidate else None
+        revise_fn = _load_revise_fn(module_path)
+        trajectory, weakest_zone_freq = _greedy_probe_rollout(env, revise_fn=revise_fn, horizon=12)
+        last_info = trajectory[-1]["info"] if trajectory else {}
+        env_summary = {
+            "communication_recovery_ratio": float(last_info.get("communication_recovery_ratio", 0.0)),
+            "power_recovery_ratio": float(last_info.get("power_recovery_ratio", 0.0)),
+            "road_recovery_ratio": float(last_info.get("road_recovery_ratio", 0.0)),
+            "critical_load_shortfall": float(last_info.get("critical_load_shortfall", 1.0)),
+            "backbone_comm_ratio": float(last_info.get("backbone_comm_ratio", last_info.get("communication_recovery_ratio", 0.0))),
+            "backbone_power_ratio": float(last_info.get("backbone_power_ratio", last_info.get("power_recovery_ratio", 0.0))),
+            "backbone_road_ratio": float(last_info.get("backbone_road_ratio", last_info.get("road_recovery_ratio", 0.0))),
+            "weakest_zone": str(last_info.get("weakest_zone", "A")),
+            "weakest_layer": str(last_info.get("weakest_layer", "0")),
+            "constraint_violation_count": int(last_info.get("constraint_violation_count", 0)),
+        }
+        trajectory_summary = summarize_trajectory(trajectory)
+        probe_action_usage: dict[str, float] = {}
+        for item in trajectory:
+            akey = str(item["action"])
+            probe_action_usage[akey] = probe_action_usage.get(akey, 0.0) + 1.0
+        trajectory_summary["action_category_distribution"] = _aggregate_action_category_distribution(
+            probe_action_usage
+        )
+        trajectory_summary["weakest_zone_frequency"] = weakest_zone_freq
+        trajectory_summary["source"] = "greedy_probe_rollout"
 
-    env_summary = {
-        "communication_recovery_ratio": info.get("communication_recovery_ratio", 0.0),
-        "power_recovery_ratio": info.get("power_recovery_ratio", 0.0),
-        "road_recovery_ratio": info.get("road_recovery_ratio", 0.0),
-        "critical_load_shortfall": info.get("critical_load_shortfall", 1.0),
-        "constraint_violation_count": info.get("constraint_violation_count", 0),
-        "weakest_zone": info.get("weakest_zone", "A"),
-        "weakest_layer": info.get("weakest_layer", "0"),
-    }
     return {
         "env_summary": env_summary,
-        "trajectory_summary": summarize_trajectory(trajectory),
+        "trajectory_summary": trajectory_summary,
         "previous_metrics": previous_metrics,
     }
 
@@ -192,8 +316,9 @@ def main() -> None:
     route = {"task_mode": args.fixed_task_mode or default_mode, "confidence": 0.8, "reason": "default", "stage": "middle"}
 
     for round_idx in range(rounds):
-        prev_metrics = history[-1].get("best_candidate", {}).get("metrics", {}) if history else {}
-        routing_context = collect_routing_context(args.env, prev_metrics, cfg)
+        previous_best = history[-1].get("best_candidate", {}) if history else None
+        prev_metrics = previous_best.get("metrics", {}) if previous_best else {}
+        routing_context = collect_routing_context(args.env, prev_metrics, cfg, previous_best_candidate=previous_best)
 
         if round_idx == 0 or args.reroute_each_round:
             if args.fixed_task_mode:

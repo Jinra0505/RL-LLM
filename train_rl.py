@@ -20,6 +20,20 @@ from mock_recovery_env import ProjectRecoveryEnv
 LOGGER = logging.getLogger(__name__)
 
 
+def _action_category(action: int) -> str:
+    if action in {0, 1, 2}:
+        return "road"
+    if action in {3, 4, 5}:
+        return "power"
+    if action in {6, 7, 8}:
+        return "comm"
+    if action in {9, 10, 11}:
+        return "mes"
+    if action == 12:
+        return "feeder"
+    return "coordinated"
+
+
 class QNet(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = 128) -> None:
         super().__init__()
@@ -161,6 +175,7 @@ def run_training(
     road_scores: list[float] = []
     crit_scores: list[float] = []
     violations = 0
+    train_total_steps = 0
 
     for ep in range(train_episodes):
         s, info = env.reset(seed=seed + ep)
@@ -211,6 +226,7 @@ def run_training(
             ep_reward += r
             s = ns
             global_step += 1
+            train_total_steps += 1
 
             if info.get("constraint_violation", False):
                 violations += 1
@@ -223,27 +239,109 @@ def run_training(
         episode_rewards.append(ep_reward)
 
     # Evaluation (greedy)
+    eval_backbone_comm: list[float] = []
+    eval_backbone_power: list[float] = []
+    eval_backbone_road: list[float] = []
+    eval_invalid_rates: list[float] = []
+    eval_violation_rates: list[float] = []
+    eval_progress_deltas: list[float] = []
+    eval_stage_indicators: list[float] = []
+    eval_mes_usage_rates: list[float] = []
+    eval_mes_soc_end: list[float] = []
+    eval_material_end: list[float] = []
+    eval_switching_end: list[float] = []
+    eval_crew_power_end: list[float] = []
+    eval_crew_comm_end: list[float] = []
+    eval_crew_road_end: list[float] = []
+    eval_zone_A_power: list[float] = []
+    eval_zone_B_power: list[float] = []
+    eval_zone_C_power: list[float] = []
+    eval_zone_A_comm: list[float] = []
+    eval_zone_B_comm: list[float] = []
+    eval_zone_C_comm: list[float] = []
+    eval_zone_A_road: list[float] = []
+    eval_zone_B_road: list[float] = []
+    eval_zone_C_road: list[float] = []
+    eval_zone_A_load: list[float] = []
+    eval_zone_B_load: list[float] = []
+    eval_zone_C_load: list[float] = []
+    eval_steps_per_episode: list[int] = []
+    eval_terminated_count = 0
+    eval_truncated_count = 0
+    eval_action_usage = {str(i): 0 for i in range(action_dim)}
+
     for ep in range(eval_episodes):
         s, info = env.reset(seed=seed + 1000 + ep)
         total = 0.0
+        ep_steps = 0
+        ep_invalid = 0
+        ep_violate = 0
+        ep_progress: list[float] = []
+        ep_stage: list[float] = []
+        ep_mes_moves = 0
+        terminated = False
+        truncated = False
         for _ in range(max_steps_per_episode):
             rs = _effective_state(_call_revise(revise_state_fn, s, info), max_revised_dim)
             with torch.no_grad():
                 qvals = q_net(torch.tensor(rs, dtype=torch.float32).unsqueeze(0))
                 a = int(torch.argmax(qvals, dim=1).item())
+            eval_action_usage[str(a)] += 1
             ns, ext_r, terminated, truncated, info = env.step(a)
             total += float(ext_r)
+            ep_steps += 1
+            ep_invalid += int(bool(info.get("invalid_action", False)))
+            ep_violate += int(bool(info.get("constraint_violation", False)))
+            ep_progress.append(float(info.get("progress_delta", 0.0)))
+            ep_stage.append(float(info.get("stage_indicator", 0.0)))
+            if a in {9, 10, 11}:
+                ep_mes_moves += 1
             s = ns
             if terminated or truncated:
                 break
 
         eval_rewards.append(total)
+        eval_steps_per_episode.append(ep_steps)
+        eval_terminated_count += int(bool(terminated))
+        eval_truncated_count += int(bool(truncated))
         comm_scores.append(float(info.get("communication_recovery_ratio", 0.0)))
         power_scores.append(float(info.get("power_recovery_ratio", 0.0)))
         road_scores.append(float(info.get("road_recovery_ratio", 0.0)))
         crit_scores.append(float(info.get("critical_load_recovery_ratio", 0.0)))
+        eval_backbone_comm.append(float(info.get("backbone_comm_ratio", info.get("communication_recovery_ratio", 0.0))))
+        eval_backbone_power.append(float(info.get("backbone_power_ratio", info.get("power_recovery_ratio", 0.0))))
+        eval_backbone_road.append(float(info.get("backbone_road_ratio", info.get("road_recovery_ratio", 0.0))))
+        eval_invalid_rates.append(ep_invalid / float(max(1, ep_steps)))
+        eval_violation_rates.append(ep_violate / float(max(1, ep_steps)))
+        eval_progress_deltas.append(float(np.mean(ep_progress)) if ep_progress else 0.0)
+        eval_stage_indicators.append(float(np.mean(ep_stage)) if ep_stage else 0.0)
+        eval_mes_usage_rates.append(ep_mes_moves / float(max(1, ep_steps)))
+        eval_mes_soc_end.append(float(info.get("mes_soc", 0.0)))
+        eval_material_end.append(float(info.get("material_stock", 0.0)))
+        eval_switching_end.append(float(info.get("switching_capability", 0.0)))
+        eval_crew_power_end.append(float(info.get("crew_power_status", 0.0)))
+        eval_crew_comm_end.append(float(info.get("crew_comm_status", 0.0)))
+        eval_crew_road_end.append(float(info.get("crew_road_status", 0.0)))
+        eval_zone_A_power.append(float(info.get("zone_A_power_ratio", 0.0)))
+        eval_zone_B_power.append(float(info.get("zone_B_power_ratio", 0.0)))
+        eval_zone_C_power.append(float(info.get("zone_C_power_ratio", 0.0)))
+        eval_zone_A_comm.append(float(info.get("zone_A_comm_ratio", 0.0)))
+        eval_zone_B_comm.append(float(info.get("zone_B_comm_ratio", 0.0)))
+        eval_zone_C_comm.append(float(info.get("zone_C_comm_ratio", 0.0)))
+        eval_zone_A_road.append(float(info.get("zone_A_road_ratio", 0.0)))
+        eval_zone_B_road.append(float(info.get("zone_B_road_ratio", 0.0)))
+        eval_zone_C_road.append(float(info.get("zone_C_road_ratio", 0.0)))
+        eval_zone_A_load.append(float(info.get("zone_A_critical_load_ratio", 0.0)))
+        eval_zone_B_load.append(float(info.get("zone_B_critical_load_ratio", 0.0)))
+        eval_zone_C_load.append(float(info.get("zone_C_critical_load_ratio", 0.0)))
 
     total_actions = max(1, sum(action_usage.values()))
+    action_usage_norm = {k: v / total_actions for k, v in action_usage.items()}
+    action_category_usage = {"road": 0.0, "power": 0.0, "comm": 0.0, "mes": 0.0, "feeder": 0.0, "coordinated": 0.0}
+    for a_str, frac in action_usage_norm.items():
+        action_category_usage[_action_category(int(a_str))] += float(frac)
+    dominant_action_category = max(action_category_usage.items(), key=lambda kv: kv[1])[0]
+
     result = {
         "episode_rewards": episode_rewards,
         "eval_rewards": eval_rewards,
@@ -255,13 +353,53 @@ def run_training(
         "recovery_completion_time": float(np.mean(completion_steps)) if completion_steps else float(max_steps_per_episode),
         "cumulative_reward_mean": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
         "constraint_violation_count": int(violations),
+        "constraint_violation_rate": float(np.mean(eval_violation_rates)) if eval_violation_rates else 0.0,
+        "train_constraint_violation_rate": float(violations) / float(max(1, train_total_steps)),
+        "invalid_action_rate": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
+        "mean_progress_delta_eval": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
+        "mean_stage_indicator_eval": float(np.mean(eval_stage_indicators)) if eval_stage_indicators else 0.0,
+        "backbone_comm_ratio": float(np.mean(eval_backbone_comm)) if eval_backbone_comm else 0.0,
+        "backbone_power_ratio": float(np.mean(eval_backbone_power)) if eval_backbone_power else 0.0,
+        "backbone_road_ratio": float(np.mean(eval_backbone_road)) if eval_backbone_road else 0.0,
+        "mes_usage_rate": float(np.mean(eval_mes_usage_rates)) if eval_mes_usage_rates else 0.0,
+        "mes_soc_mean_end": float(np.mean(eval_mes_soc_end)) if eval_mes_soc_end else 0.0,
+        "material_stock_mean_end": float(np.mean(eval_material_end)) if eval_material_end else 0.0,
+        "switching_capability_mean_end": float(np.mean(eval_switching_end)) if eval_switching_end else 0.0,
+        "crew_power_status_mean_end": float(np.mean(eval_crew_power_end)) if eval_crew_power_end else 0.0,
+        "crew_comm_status_mean_end": float(np.mean(eval_crew_comm_end)) if eval_crew_comm_end else 0.0,
+        "crew_road_status_mean_end": float(np.mean(eval_crew_road_end)) if eval_crew_road_end else 0.0,
+        "zone_A_power_ratio": float(np.mean(eval_zone_A_power)) if eval_zone_A_power else 0.0,
+        "zone_B_power_ratio": float(np.mean(eval_zone_B_power)) if eval_zone_B_power else 0.0,
+        "zone_C_power_ratio": float(np.mean(eval_zone_C_power)) if eval_zone_C_power else 0.0,
+        "zone_A_comm_ratio": float(np.mean(eval_zone_A_comm)) if eval_zone_A_comm else 0.0,
+        "zone_B_comm_ratio": float(np.mean(eval_zone_B_comm)) if eval_zone_B_comm else 0.0,
+        "zone_C_comm_ratio": float(np.mean(eval_zone_C_comm)) if eval_zone_C_comm else 0.0,
+        "zone_A_road_ratio": float(np.mean(eval_zone_A_road)) if eval_zone_A_road else 0.0,
+        "zone_B_road_ratio": float(np.mean(eval_zone_B_road)) if eval_zone_B_road else 0.0,
+        "zone_C_road_ratio": float(np.mean(eval_zone_C_road)) if eval_zone_C_road else 0.0,
+        "zone_A_critical_load_ratio": float(np.mean(eval_zone_A_load)) if eval_zone_A_load else 0.0,
+        "zone_B_critical_load_ratio": float(np.mean(eval_zone_B_load)) if eval_zone_B_load else 0.0,
+        "zone_C_critical_load_ratio": float(np.mean(eval_zone_C_load)) if eval_zone_C_load else 0.0,
         "task_mode_used": task_mode,
         "llm_mode_used": llm_mode,
         "revise_module_path": str(revise_module_path),
         "policy_feature_dim_used": state_dim,
         "env_name": env_name,
         "severity": severity,
-        "action_usage": {k: v / total_actions for k, v in action_usage.items()},
+        "action_usage": action_usage_norm,
+        "action_category_usage": action_category_usage,
+        "dominant_action_category": dominant_action_category,
+        "eval_trajectory_summary": {
+            "mean_steps": float(np.mean(eval_steps_per_episode)) if eval_steps_per_episode else 0.0,
+            "terminated_rate": eval_terminated_count / float(max(1, eval_episodes)),
+            "truncated_rate": eval_truncated_count / float(max(1, eval_episodes)),
+            "mean_invalid_action_rate": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
+            "mean_constraint_violation_rate": float(np.mean(eval_violation_rates)) if eval_violation_rates else 0.0,
+            "mean_progress_delta": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
+            "eval_action_usage": {
+                k: v / float(max(1, sum(eval_action_usage.values()))) for k, v in eval_action_usage.items()
+            },
+        },
     }
 
     weights_cfg = task_mode_metric_weights or {}
