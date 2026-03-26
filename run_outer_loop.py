@@ -17,7 +17,7 @@ from router import route_llm, route_rule, summarize_trajectory
 from train_rl import run_training
 
 LOGGER = logging.getLogger(__name__)
-ALLOWED_IMPORTS = {"numpy", "math"}
+ALLOWED_IMPORTS = {"numpy", "math", "__future__"}
 FORBIDDEN_CALLS = {"eval", "exec", "compile", "open", "__import__", "input"}
 
 
