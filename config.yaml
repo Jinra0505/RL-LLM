@@ -5,7 +5,7 @@ llm:
   max_tokens: 1400
 
 outer_loop:
-  rounds: 2
+  rounds: 1
   candidates_per_round: 2
 
 selection:
@@ -16,13 +16,13 @@ selection:
       success_rate: 0.2
       constraint_violation_count: -0.15
     critical_load_priority:
-      critical_load_recovery_ratio: 0.65
+      power_recovery_ratio: 0.65
       success_rate: 0.2
       constraint_violation_count: -0.15
     system_recovery_priority:
       success_rate: 0.45
       communication_recovery_ratio: 0.2
-      critical_load_recovery_ratio: 0.2
+      power_recovery_ratio: 0.2
       transportation_recovery_ratio: 0.15
     stabilization_priority:
       success_rate: 0.25

@@ -100,9 +100,9 @@ def collect_routing_context(env_name: str, previous_metrics: dict[str, Any]) -> 
         if terminated or truncated:
             break
     env_summary = {
-        "communication_recovery_level": info.get("communication_recovery_level", 0.0),
-        "critical_load_recovery_level": info.get("critical_load_recovery_level", 0.0),
-        "transportation_accessibility": info.get("transportation_accessibility", 0.0),
+        "communication_recovery_ratio": info.get("communication_recovery_ratio", 0.0),
+        "power_recovery_ratio": info.get("power_recovery_ratio", 0.0),
+        "transportation_accessibility_ratio": info.get("transportation_accessibility_ratio", 0.0),
         "constraint_violation_count": info.get("constraint_violation_count", 0),
     }
     return {
@@ -147,8 +147,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Minimal outer loop for LLM-guided recovery shaping.")
     parser.add_argument("--env", default="mock_recovery")
     parser.add_argument("--llm-mode", choices=["auto", "mock", "real"], default="auto")
-    parser.add_argument("--router-mode", choices=["off", "rule", "llm"], default="rule")
-    parser.add_argument("--fixed-task-mode", default="")
+    parser.add_argument("--router-mode", choices=["off", "rule", "llm"], default="off")
+    parser.add_argument("--fixed-task-mode", default="system_recovery_priority")
     parser.add_argument("--reroute-each-round", action="store_true")
     parser.add_argument("--rounds-override", type=int, default=0)
     parser.add_argument("--config", default="config.yaml")
@@ -260,7 +260,7 @@ def main() -> None:
                 record["metrics"] = metrics
                 record["candidate_path"] = str(candidate_path)
             else:
-                record["metrics"] = {"selection_score": -1e9 if higher_is_better else 1e9, "success_rate": 0.0, "constraint_violation_count": 0}
+                record["metrics"] = {"selection_score": -1e9 if higher_is_better else 1e9, "success_rate": 0.0, "constraint_violation_count": 0, "cumulative_reward_mean": 0.0}
                 record["error"] = "Validation failed, skipped training"
 
             (cdir / "candidate_record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")

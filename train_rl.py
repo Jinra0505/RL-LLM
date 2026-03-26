@@ -111,14 +111,14 @@ def run_training(
     eval_rewards: list[float] = []
     successes = 0
     comm_scores: list[float] = []
-    crit_scores: list[float] = []
+    power_scores: list[float] = []
     trans_scores: list[float] = []
     resource_values: list[float] = []
     completion_steps: list[int] = []
     violation_count = 0
     progress_deltas: list[float] = []
-    stage_acc = {"early_recovery": 0.0, "mid_recovery": 0.0, "late_recovery": 0.0}
-    stage_cnt = {"early_recovery": 0, "mid_recovery": 0, "late_recovery": 0}
+    stage_acc = {"early": 0.0, "middle": 0.0, "late": 0.0}
+    stage_cnt = {"early": 0, "middle": 0, "late": 0}
 
     np.random.seed(seed)
     for ep in range(train_episodes):
@@ -153,7 +153,7 @@ def run_training(
             if info.get("constraint_violation", False):
                 violation_count += 1
             progress_deltas.append(float(info.get("progress_delta", 0.0)))
-            stage = str(info.get("stage", "early_recovery"))
+            stage = str(info.get("stage", "early"))
             if stage in stage_acc:
                 stage_acc[stage] += float(info.get("progress_delta", 0.0))
                 stage_cnt[stage] += 1
@@ -182,9 +182,9 @@ def run_training(
             if terminated or truncated:
                 break
         eval_rewards.append(total)
-        comm_scores.append(float(info.get("communication_recovery_level", 0.0)))
-        crit_scores.append(float(info.get("critical_load_recovery_level", 0.0)))
-        trans_scores.append(float(info.get("transportation_accessibility", 0.0)))
+        comm_scores.append(float(info.get("communication_recovery_ratio", 0.0)))
+        power_scores.append(float(info.get("power_recovery_ratio", 0.0)))
+        trans_scores.append(float(info.get("transportation_accessibility_ratio", 0.0)))
         resource_values.append(float(info.get("available_repair_resources", 0.0)))
 
     total_actions = max(1, sum(action_usage.values()))
@@ -193,13 +193,14 @@ def run_training(
         "eval_rewards": eval_rewards,
         "success_rate": successes / max(1, train_episodes),
         "communication_recovery_ratio": float(np.mean(comm_scores)) if comm_scores else 0.0,
-        "critical_load_recovery_ratio": float(np.mean(crit_scores)) if crit_scores else 0.0,
+        "power_recovery_ratio": float(np.mean(power_scores)) if power_scores else 0.0,
         "transportation_recovery_ratio": float(np.mean(trans_scores)) if trans_scores else 0.0,
         "recovery_completion_time": float(np.mean(completion_steps)) if completion_steps else float(max_steps_per_episode),
         "resource_utilization": float(1.0 - np.mean(resource_values)) if resource_values else 0.0,
         "constraint_violation_count": int(violation_count),
         "mean_progress_delta": float(np.mean(progress_deltas)) if progress_deltas else 0.0,
         "stage_progress": {k: (stage_acc[k] / stage_cnt[k] if stage_cnt[k] else 0.0) for k in stage_acc},
+        "cumulative_reward_mean": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
         "task_mode_used": task_mode,
         "llm_mode_used": llm_mode,
         "revise_module_path": str(revise_module_path),

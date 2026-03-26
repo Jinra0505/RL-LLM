@@ -1,25 +1,58 @@
-# RL-LLM Minimal Prototype
+# Minimal RL-LLM Project-Paper Prototype
 
-This repository is intentionally small and keeps one main pipeline:
+This repository supports exactly one paper-facing comparison in a **reduced-order three-layer coupled recovery environment**:
 
-`run_outer_loop.py -> router.py -> llm_client.py -> generated candidate -> train_rl.py -> outputs/`
+1. **Experiment 1: RL-Baseline**
+2. **Experiment 3: RL + LLM**
 
-## File layout
+Main workflow:
 
-- `run_outer_loop.py` : outer-loop orchestration (routing, codegen, validation, selection, feedback)
-- `train_rl.py` : RL training/evaluation with dynamic candidate import
-- `llm_client.py` : DeepSeek real mode + mock fallback
-- `router.py` : trajectory summarization + rule/LLM routing
-- `mock_recovery_env.py` : stage-aware mock environment
-- `prompts.py` : prompt strings
-- `config.yaml` : all runtime config (llm/training/selection/task modes)
-- `baseline_noop.py` : fallback revise/reward
+`run_outer_loop.py -> llm_client.py -> generated candidate -> train_rl.py -> outputs/`
 
-## Key behavior
+## Simplified three-layer coupled environment
 
-1. Generated code is validated before training (`run_outer_loop.py`).
-2. Policy learning uses **revised_state features** directly (not raw-state-only), with optional cap via `state_representation.max_revised_dim` in `config.yaml`.
-3. Candidate selection and evaluation summary are **task-mode-dependent** through weighted metrics in `config.yaml` (`selection.task_mode_metric_weights`).
+`mock_recovery_env.py` models post-disaster recovery with compact aggregated variables (not full network simulation):
+
+- **Communication layer**: communication recovery ratio
+- **Power layer**: power/critical-load recovery ratio (+ storage level)
+- **Transportation layer**: transportation accessibility ratio
+
+State remains compact (7 dims):
+
+- communication recovery ratio
+- power recovery ratio
+- transportation accessibility ratio
+- available repair resources
+- mobile energy storage
+- stage indicator (early/middle/late)
+- constraint flag
+
+### Coupling rules implemented
+
+1. **Power supports communication**: communication-priority action effectiveness is reduced when power recovery is low.
+2. **Transportation supports communication and power restoration**: low transport reduces communication/power action gains and increases resource cost.
+3. **Communication improves coordinated recovery**: balanced action gets a gain bonus when communication recovery is high.
+
+## Revised-state policy usage (important)
+
+In `train_rl.py`, policy-state encoding is built from `revised_state` (not raw state only).
+By default, all revised features are used; optional cap is controlled by `state_representation.max_revised_dim` in `config.yaml`.
+
+## Task mode usage (paper-simple)
+
+Default flow uses fixed task mode: `system_recovery_priority`.
+Router is optional and off by default.
+Candidate selection uses task-mode-weighted `selection_score` from `config.yaml`.
+
+## Core metrics
+
+Focused metrics for paper reporting:
+
+- communication recovery ratio
+- power recovery ratio
+- recovery completion time
+- cumulative reward (mean over training episodes)
+- constraint violation count
 
 ## Install
 
@@ -27,19 +60,21 @@ This repository is intentionally small and keeps one main pipeline:
 pip install -r requirements.txt
 ```
 
-## Run outer loop (mock mode)
+## Experiment 1: RL-Baseline
+
+```bash
+python train_rl.py --env mock_recovery --llm-mode mock --task-mode system_recovery_priority --revise-module baseline_noop.py --output outputs/exp1_baseline.json
+```
+
+## Experiment 3: RL + LLM
 
 ```bash
 python run_outer_loop.py --env mock_recovery --llm-mode mock
 ```
 
-## Run trainer directly
+(Outer loop generates candidate revise/reward code, validates it, trains RL, and saves outputs.)
 
-```bash
-python train_rl.py --env mock_recovery --llm-mode mock --task-mode system_recovery_priority
-```
-
-## Real DeepSeek mode later
+## Optional real DeepSeek mode
 
 ```bash
 export DEEPSEEK_API_KEY=your_real_key
@@ -50,6 +85,6 @@ python run_outer_loop.py --env mock_recovery --llm-mode real
 
 ## Notes
 
+- This is intentionally a small project-paper prototype.
 - Mock mode works end-to-end without any API key.
-- This minimal prototype supports only `mock_recovery` environment.
-- Outputs are saved under `outputs/run_*` with prompt/response/validation/training artifacts.
+- Outputs are written under `outputs/`.
