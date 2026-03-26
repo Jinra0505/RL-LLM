@@ -1,52 +1,45 @@
-# RL-LLM Post-Disaster Coordinated Recovery Framework
+# RL-LLM Minimal Prototype
 
-A runnable backbone for **LLM outer loop + RL inner loop** experiments on coupled communication/power/transport recovery.
+This repository is intentionally kept small.
 
-## Highlights
+Core workflow:
 
-- Configuration-driven task modes, prompts, and environment schema.
-- Pluggable task router (`rule` or `llm`, or disabled).
-- DeepSeek integration via **single entry point**: `llm/deepseek_client.py`.
-- Auto mock mode when `DEEPSEEK_API_KEY` is missing.
-- End-to-end loop: route -> generate revise/reward code -> train/eval -> feedback -> iterate.
-- Generated revise modules saved in `generated/`; experiment outputs saved in `outputs/`.
+`outer loop -> router -> LLM/mock code generation -> generated revise/reward module -> RL training -> outputs`
 
-## Project structure
+## Minimal file layout
 
-- `run_outer_loop.py`: outer-loop orchestration.
-- `train_rl.py`: RL inner loop trainer with dynamic revise module loading.
-- `envs/mock_recovery_env.py`: minimal Gymnasium recovery environment.
-- `task_router/`: optional routing subsystem.
-- `llm/`: DeepSeek client and structured mock responses.
-- `configs/`: task modes, llm settings, environment schema.
-- `prompts/`: modular prompt assets.
-- `baseline_noop.py`: fallback revise/reward module.
+- `run_outer_loop.py` : main outer loop
+- `train_rl.py` : RL training entrypoint
+- `llm_client.py` : DeepSeek (real) + mock client in one file
+- `router.py` : trajectory summary + rule/LLM routing in one file
+- `mock_recovery_env.py` : runnable Gymnasium mock environment
+- `prompts.py` : prompt strings
+- `config.yaml` : single config file
+- `baseline_noop.py` : fallback revise/reward module
+- `generated/` : generated candidate modules
+- `outputs/` : run outputs and artifacts
 
-## Setup
+## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run without API key (explicit mock mode)
+## Run (mock mode, no API key required)
 
 ```bash
-python run_outer_loop.py --env mock_recovery --llm-mode mock
+python run_outer_loop.py --env mock_recovery --llm-mode mock --router-mode rule --rounds-override 1
 ```
 
-## Run with automatic mode
+## Run (auto mode)
 
 ```bash
-python run_outer_loop.py --env mock_recovery --llm-mode auto
+python run_outer_loop.py --env mock_recovery --llm-mode auto --router-mode rule
 ```
 
-If `DEEPSEEK_API_KEY` is not set, auto mode logs:
+If `DEEPSEEK_API_KEY` is missing, auto mode uses mock mode.
 
-> DEEPSEEK_API_KEY not found, running in mock LLM mode.
-
-## Run later with real DeepSeek API
+## Run with real DeepSeek later
 
 ```bash
 export DEEPSEEK_API_KEY=your_real_key
@@ -55,35 +48,14 @@ export DEEPSEEK_MODEL=deepseek-chat
 python run_outer_loop.py --env mock_recovery --llm-mode real
 ```
 
-If `--llm-mode real` is used without `DEEPSEEK_API_KEY`, execution fails with a clear error.
-
-## Optional routing modes
+## Run trainer directly
 
 ```bash
-# Rule-based router (default)
-python run_outer_loop.py --router-mode rule
-
-# LLM-based router
-python run_outer_loop.py --router-mode llm --llm-mode mock
-
-# Disable routing and use configured/fixed mode
-python run_outer_loop.py --router-mode off --fixed-task-mode stabilization_priority
+python train_rl.py --env mock_recovery --llm-mode mock --task-mode system_recovery_priority --output outputs/rl_result.json
 ```
 
-## Running the RL trainer directly
+## Notes
 
-```bash
-python train_rl.py --env mock_recovery --revise-module generated/generated_candidate_mock_0.py --task-mode system_recovery_priority --llm-mode mock
-```
-
-If `--revise-module` is omitted, `baseline_noop.py` is used automatically.
-
-## Migration notes from legacy files
-
-Legacy files are preserved (`lesr_main.py`, `lesr_train.py`, etc.) for reference. New entrypoints:
-
-- `lesr_main.py` -> `run_outer_loop.py`
-- `lesr_train.py` -> `train_rl.py`
-- `calssify.py` remains as compatibility shim; preferred name is `classify.py`
-
-The new framework removes DSO-specific hardcoded assumptions and uses recovery-oriented task modes from config.
+- Outer loop validates generated code before training (required fields, syntax, imports, function existence).
+- This prototype currently supports only `mock_recovery` environment.
+- `outputs/run_*` stores prompts, raw responses, validation reports, training results, and round summaries.
