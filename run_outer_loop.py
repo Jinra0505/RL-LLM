@@ -30,6 +30,18 @@ def parse_json_with_repair(raw: str) -> tuple[dict[str, Any], bool]:
     try:
         return json.loads(raw), False
     except json.JSONDecodeError:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+            try:
+                return json.loads(cleaned), True
+            except json.JSONDecodeError:
+                pass
         s = raw.find("{")
         e = raw.rfind("}")
         if s != -1 and e != -1 and e > s:
@@ -341,6 +353,7 @@ def main() -> None:
             cdir.mkdir(parents=True, exist_ok=True)
 
             prompt = CODEGEN_PROMPT.format(task_mode=route["task_mode"], stage=route["stage"], observation_schema=str(cfg["env"]))
+            prompt += "\n\nReturn compact JSON and keep generated code concise (<= 80 lines)."
             if history:
                 prompt += "\n\nLatest feedback:\n" + json.dumps(history[-1].get("feedback_payload", {}), indent=2)
 
