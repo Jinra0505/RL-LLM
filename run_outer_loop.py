@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from llm_client import LLMClient
-from mock_recovery_env import MockRecoveryEnv
+from mock_recovery_env import ProjectRecoveryEnv
 from prompts import CODEGEN_PROMPT, FEEDBACK_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
 from router import route_llm, route_rule, summarize_trajectory
 from train_rl import run_training
@@ -78,32 +78,39 @@ def validate_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     if node.func.id in FORBIDDEN_CALLS:
                         errors.append(f"Forbidden call: {node.func.id}")
-        except SyntaxError as exc:
-            errors.append(f"Syntax error: {exc}")
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"Compile error: {exc}")
+            errors.append(f"Code validation error: {exc}")
 
     return {"valid": len(errors) == 0, "errors": errors, "normalized_payload": normalized}
 
 
-def collect_routing_context(env_name: str, previous_metrics: dict[str, Any]) -> dict[str, Any]:
-    if env_name != "mock_recovery":
-        raise ValueError("This minimal prototype supports only mock_recovery")
-    env = MockRecoveryEnv(max_steps=20, seed=101)
-    state, info = env.reset(seed=101)
-    _ = state
+def collect_routing_context(env_name: str, previous_metrics: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    if env_name not in {"project_recovery", "mock_recovery"}:
+        raise ValueError("Supported env names: project_recovery or mock_recovery")
+
+    env = ProjectRecoveryEnv(
+        max_steps=int(cfg["env"].get("max_steps", 60)),
+        seed=101,
+        severity=str(cfg.get("scenario", {}).get("severity", "moderate")),
+        reward_weights=cfg.get("reward_weights", {}),
+    )
+    _, info = env.reset(seed=101)
     trajectory: list[dict[str, Any]] = []
-    for step_idx in range(10):
+    for step_idx in range(12):
         action = step_idx % int(env.action_space.n)
-        _state, _reward, terminated, truncated, info = env.step(action)
+        _, _, terminated, truncated, info = env.step(action)
         trajectory.append({"step": step_idx, "action": action, "info": info})
         if terminated or truncated:
             break
+
     env_summary = {
         "communication_recovery_ratio": info.get("communication_recovery_ratio", 0.0),
         "power_recovery_ratio": info.get("power_recovery_ratio", 0.0),
-        "transportation_accessibility_ratio": info.get("transportation_accessibility_ratio", 0.0),
+        "road_recovery_ratio": info.get("road_recovery_ratio", 0.0),
+        "critical_load_shortfall": info.get("critical_load_shortfall", 1.0),
         "constraint_violation_count": info.get("constraint_violation_count", 0),
+        "weakest_zone": info.get("weakest_zone", "A"),
+        "weakest_layer": info.get("weakest_layer", "0"),
     }
     return {
         "env_summary": env_summary,
@@ -115,14 +122,14 @@ def collect_routing_context(env_name: str, previous_metrics: dict[str, Any]) -> 
 def build_feedback(best_candidate: dict[str, Any], score_metric: str) -> dict[str, Any]:
     metrics = best_candidate.get("metrics", {})
     hints: list[str] = []
-    if int(metrics.get("constraint_violation_count", 0)) > 4:
-        hints.append("Violations are frequent.")
-    if float(metrics.get("success_rate", 0.0)) < 0.25:
-        hints.append("Success rate is low.")
-    if float(metrics.get("mean_progress_delta", 0.0)) < 0.002:
-        hints.append("Progress appears stalled.")
+    if int(metrics.get("constraint_violation_count", 0)) > 5:
+        hints.append("Constraint violations are frequent.")
+    if float(metrics.get("critical_load_recovery_ratio", 0.0)) < 0.6:
+        hints.append("Critical load recovery is still low.")
+    if float(metrics.get("road_recovery_ratio", 0.0)) < 0.6:
+        hints.append("Road restoration is lagging and may bottleneck repairs.")
     if not hints:
-        hints.append("No critical failure detected.")
+        hints.append("No major failure mode detected.")
 
     return {
         "primary_score_metric": score_metric,
@@ -144,11 +151,11 @@ def select_best(results: list[dict[str, Any]], metric: str, higher_is_better: bo
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    parser = argparse.ArgumentParser(description="Minimal outer loop for LLM-guided recovery shaping.")
-    parser.add_argument("--env", default="mock_recovery")
+    parser = argparse.ArgumentParser(description="LLM outer loop for project-grade tri-layer recovery env.")
+    parser.add_argument("--env", default="project_recovery")
     parser.add_argument("--llm-mode", choices=["auto", "mock", "real"], default="auto")
-    parser.add_argument("--router-mode", choices=["off", "rule", "llm"], default="off")
-    parser.add_argument("--fixed-task-mode", default="system_recovery_priority")
+    parser.add_argument("--router-mode", choices=["off", "rule", "llm"], default="rule")
+    parser.add_argument("--fixed-task-mode", default="")
     parser.add_argument("--reroute-each-round", action="store_true")
     parser.add_argument("--rounds-override", type=int, default=0)
     parser.add_argument("--config", default="config.yaml")
@@ -176,35 +183,23 @@ def main() -> None:
     run_dir = outputs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_snapshot.json").write_text(
-        json.dumps(
-            {
-                "args": vars(args),
-                "config": cfg,
-                "llm_effective_mode": "mock" if client.using_mock else "real",
-                "seed_base": 42,
-            },
-            indent=2,
-        ),
+        json.dumps({"args": vars(args), "config": cfg, "llm_effective_mode": "mock" if client.using_mock else "real"}, indent=2),
         encoding="utf-8",
     )
 
+    default_mode = str(cfg.get("task_modes", {}).get("default", "coordinated_restoration"))
     history: list[dict[str, Any]] = []
-    route = {
-        "task_mode": args.fixed_task_mode or cfg["task_modes"]["default"],
-        "confidence": 0.7,
-        "reason": "Initialization",
-        "stage": "mid_recovery",
-    }
+    route = {"task_mode": args.fixed_task_mode or default_mode, "confidence": 0.8, "reason": "default", "stage": "middle"}
 
     for round_idx in range(rounds):
-        previous_metrics = history[-1].get("best_candidate", {}).get("metrics", {}) if history else {}
-        routing_context = collect_routing_context(args.env, previous_metrics)
+        prev_metrics = history[-1].get("best_candidate", {}).get("metrics", {}) if history else {}
+        routing_context = collect_routing_context(args.env, prev_metrics, cfg)
 
         if round_idx == 0 or args.reroute_each_round:
             if args.fixed_task_mode:
-                route = {"task_mode": args.fixed_task_mode, "confidence": 1.0, "reason": "fixed", "stage": "mid_recovery"}
+                route = {"task_mode": args.fixed_task_mode, "confidence": 1.0, "reason": "fixed", "stage": "middle"}
             elif args.router_mode == "off":
-                route = {"task_mode": cfg["task_modes"]["default"], "confidence": 0.7, "reason": "router off", "stage": "mid_recovery"}
+                route = {"task_mode": default_mode, "confidence": 0.8, "reason": "router off", "stage": "middle"}
             elif args.router_mode == "rule":
                 route = route_rule(routing_context)
             else:
@@ -213,7 +208,6 @@ def main() -> None:
         round_dir = run_dir / f"round_{round_idx+1}"
         round_dir.mkdir(parents=True, exist_ok=True)
         (round_dir / "route.json").write_text(json.dumps(route, indent=2), encoding="utf-8")
-        (round_dir / "routing_context.json").write_text(json.dumps(routing_context, indent=2), encoding="utf-8")
 
         round_candidates: list[dict[str, Any]] = []
         for sample_idx in range(candidates_per_round):
@@ -221,18 +215,17 @@ def main() -> None:
             cdir = round_dir / cid
             cdir.mkdir(parents=True, exist_ok=True)
 
-            prompt = CODEGEN_PROMPT.format(task_mode=route["task_mode"], stage=route["stage"], observation_schema=json.dumps(cfg["env"]["observation_fields"], indent=2))
+            prompt = CODEGEN_PROMPT.format(task_mode=route["task_mode"], stage=route["stage"], observation_schema=str(cfg["env"]))
             if history:
                 prompt += "\n\nLatest feedback:\n" + json.dumps(history[-1].get("feedback_payload", {}), indent=2)
 
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
-            raw_response = client.chat(messages, response_kind="codegen", sample_idx=sample_idx + round_idx * 10)
-            parsed, repaired = parse_json_with_repair(raw_response)
+            raw = client.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}], response_kind="codegen", sample_idx=sample_idx + round_idx * 10)
+            parsed, repaired = parse_json_with_repair(raw)
             report = validate_candidate_payload(parsed)
             report["repaired_from_raw"] = repaired
 
             (cdir / "prompt.txt").write_text(prompt, encoding="utf-8")
-            (cdir / "raw_response.txt").write_text(raw_response, encoding="utf-8")
+            (cdir / "raw_response.txt").write_text(raw, encoding="utf-8")
             (cdir / "validation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
             record = {"candidate_id": cid, "validation": report, "candidate": report["normalized_payload"]}
@@ -248,7 +241,7 @@ def main() -> None:
                     env_name=args.env,
                     train_episodes=int(cfg["training"]["train_episodes"]),
                     eval_episodes=int(cfg["training"]["eval_episodes"]),
-                    max_steps_per_episode=int(cfg["training"]["max_steps_per_episode"]),
+                    max_steps_per_episode=int(cfg["env"]["max_steps"]),
                     gamma=float(cfg["training"]["gamma"]),
                     task_mode=route["task_mode"],
                     llm_mode="mock" if client.using_mock else "real",
@@ -256,23 +249,23 @@ def main() -> None:
                     seed=42 + round_idx * 10 + sample_idx,
                     max_revised_dim=(int(cfg.get("state_representation", {}).get("max_revised_dim")) if cfg.get("state_representation", {}).get("max_revised_dim") is not None else None),
                     task_mode_metric_weights=cfg.get("selection", {}).get("task_mode_metric_weights", {}),
+                    dqn_cfg=cfg.get("training", {}),
+                    severity=str(cfg.get("scenario", {}).get("severity", "moderate")),
                 )
                 record["metrics"] = metrics
                 record["candidate_path"] = str(candidate_path)
             else:
-                record["metrics"] = {"selection_score": -1e9 if higher_is_better else 1e9, "success_rate": 0.0, "constraint_violation_count": 0, "cumulative_reward_mean": 0.0}
-                record["error"] = "Validation failed, skipped training"
+                record["metrics"] = {"selection_score": -1e9 if higher_is_better else 1e9, "success_rate": 0.0}
+                record["error"] = "Validation failed"
 
             (cdir / "candidate_record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             round_candidates.append(record)
 
-        best_metric_values = [c["metrics"] for c in round_candidates]
-        best_metrics = select_best(best_metric_values, "selection_score", higher_is_better)
+        best_metrics = select_best([c["metrics"] for c in round_candidates], "selection_score", higher_is_better)
         best_candidate = next(c for c in round_candidates if c["metrics"] is best_metrics)
 
         feedback_payload = build_feedback(best_candidate, "selection_score")
-        feedback_messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": FEEDBACK_PROMPT + "\n\n" + json.dumps(feedback_payload, indent=2)}]
-        feedback_raw = client.chat(feedback_messages, response_kind="feedback")
+        feedback_raw = client.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": FEEDBACK_PROMPT + "\n\n" + json.dumps(feedback_payload, indent=2)}], response_kind="feedback")
         feedback_json, _ = parse_json_with_repair(feedback_raw)
 
         summary = {
@@ -283,7 +276,6 @@ def main() -> None:
             "best_candidate": best_candidate,
             "feedback_payload": feedback_payload,
             "llm_feedback": feedback_json,
-            "candidates": round_candidates,
         }
         (round_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         history.append(summary)

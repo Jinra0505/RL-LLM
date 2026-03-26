@@ -59,7 +59,7 @@ class LLMClient:
         if response_kind == "router":
             return json.dumps(
                 {
-                    "task_mode": "system_recovery_priority",
+                    "task_mode": "coordinated_restoration",
                     "confidence": 0.84,
                     "reason": "Subsystem recovery is uneven; balance restoration priorities.",
                     "stage": "mid_recovery",

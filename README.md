@@ -1,90 +1,98 @@
-# Minimal RL-LLM Project-Paper Prototype
+# RL+LLM ProjectRecovery Prototype (Medium-Complexity)
 
-This repository supports exactly one paper-facing comparison in a **reduced-order three-layer coupled recovery environment**:
+This repository implements a lightweight but project-grade RL+LLM workflow for post-disaster coordinated recovery:
 
-1. **Experiment 1: RL-Baseline**
-2. **Experiment 3: RL + LLM**
+`run_outer_loop.py -> llm_client.py -> generated candidate module -> train_rl.py -> outputs`
 
-Main workflow:
+## Environment: explicit zonal three-layer coupled recovery
 
-`run_outer_loop.py -> llm_client.py -> generated candidate -> train_rl.py -> outputs/`
+`mock_recovery_env.py` now provides `ProjectRecoveryEnv`, a reduced-order but explicit model with:
 
-## Simplified three-layer coupled environment
+- 3 zones: **A, B, C**
+- 3 layers per zone:
+  - power restoration (`P_A,P_B,P_C`)
+  - communication restoration (`C_A,C_B,C_C`)
+  - road accessibility (`R_A,R_B,R_C`)
+- backbone states: `P0, C0, R0`
+- critical-load states: `L_A, L_B, L_C`
+- process/resource states:
+  - crew status (power/comm/road)
+  - MES location + SOC
+  - material stock
+  - switching capability
+  - stage indicator
+  - constraint flag
 
-`mock_recovery_env.py` models post-disaster recovery with compact aggregated variables (not full network simulation):
+Action space: 14 discrete actions
+- 0-2 road restoration A/B/C
+- 3-5 power restoration A/B/C
+- 6-8 communication restoration A/B/C
+- 9-11 MES dispatch A/B/C
+- 12 feeder reconfiguration / load transfer
+- 13 coordinated balanced restoration
 
-- **Communication layer**: communication recovery ratio
-- **Power layer**: power/critical-load recovery ratio (+ storage level)
-- **Transportation layer**: transportation accessibility ratio
+## Coupling rules (implemented)
 
-State remains compact (7 dims):
+1. **Road -> power/comm repair efficiency** in same zone.
+2. **Communication depends on power or MES support** in-zone.
+3. **Low C0 reduces feeder/coordinated effectiveness**.
+4. **MES dispatch requires road and consumes SOC**.
+5. Stage-aware tendencies:
+   - early: trunk/backbone and access opening are important,
+   - middle: coordinated zonal restoration is efficient,
+   - late: stabilization and constraint reduction are favored.
 
-- communication recovery ratio
-- power recovery ratio
-- transportation accessibility ratio
-- available repair resources
-- mobile energy storage
-- stage indicator (early/middle/late)
-- constraint flag
+Stage progression uses weighted progress:
 
-### Coupling rules implemented
+`progress = 0.35*mean(power) + 0.35*mean(comm) + 0.30*mean(road)`
 
-1. **Power supports communication**: communication-priority action effectiveness is reduced when power recovery is low.
-2. **Transportation supports communication and power restoration**: low transport reduces communication/power action gains and increases resource cost.
-3. **Communication improves coordinated recovery**: balanced action gets a gain bonus when communication recovery is high.
+## Reward design
 
-## Revised-state policy usage (important)
+`reward = 0.20*delta_power + 0.20*delta_comm + 0.15*delta_road + 0.20*delta_critical_load + 0.10*synergy_bonus - 0.08*constraint_penalty - 0.04*action_switch_penalty - 0.03*mes_overuse_penalty`
 
-In `train_rl.py`, policy-state encoding is built from `revised_state` (not raw state only).
-By default, all revised features are used; optional cap is controlled by `state_representation.max_revised_dim` in `config.yaml`.
+## Trainer
 
-## Task mode usage (paper-simple)
+`train_rl.py` uses a lightweight DQN (PyTorch):
+- MLP Q-network + target network
+- replay buffer
+- epsilon-greedy
+- train/eval split
+- JSON output metrics + action usage
 
-Default flow uses fixed task mode: `system_recovery_priority`.
-Router is optional and off by default.
-Candidate selection uses task-mode-weighted `selection_score` from `config.yaml`.
+`revise_state` really affects policy learning: policy input is built from revised state (`_effective_state`).
 
-## Core metrics
+## Task modes
 
-Focused metrics for paper reporting:
+Available modes:
+- road_opening_priority
+- critical_power_priority
+- backbone_comm_priority
+- coordinated_restoration
+- stabilization_priority
 
-- communication recovery ratio
-- power recovery ratio
-- recovery completion time
-- cumulative reward (mean over training episodes)
-- constraint violation count
+Router uses stage + weakest layer + weakest zone + critical-load shortfall + violation frequency.
 
-## Install
+## Run
 
+Install:
 ```bash
 pip install -r requirements.txt
 ```
 
-## Experiment 1: RL-Baseline
-
+Baseline run:
 ```bash
-python train_rl.py --env mock_recovery --llm-mode mock --task-mode system_recovery_priority --revise-module baseline_noop.py --output outputs/exp1_baseline.json
+python train_rl.py --env project_recovery --llm-mode mock --task-mode coordinated_restoration --revise-module baseline_noop.py --output outputs/exp1_baseline.json
 ```
 
-## Experiment 3: RL + LLM
-
+RL+LLM run:
 ```bash
-python run_outer_loop.py --env mock_recovery --llm-mode mock
+python run_outer_loop.py --env project_recovery --llm-mode mock
 ```
 
-(Outer loop generates candidate revise/reward code, validates it, trains RL, and saves outputs.)
-
-## Optional real DeepSeek mode
-
+Optional real DeepSeek:
 ```bash
 export DEEPSEEK_API_KEY=your_real_key
 export DEEPSEEK_BASE_URL=https://api.deepseek.com
 export DEEPSEEK_MODEL=deepseek-chat
-python run_outer_loop.py --env mock_recovery --llm-mode real
+python run_outer_loop.py --env project_recovery --llm-mode real
 ```
-
-## Notes
-
-- This is intentionally a small project-paper prototype.
-- Mock mode works end-to-end without any API key.
-- Outputs are written under `outputs/`.

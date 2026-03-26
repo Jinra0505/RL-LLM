@@ -7,139 +7,297 @@ import numpy as np
 from gymnasium import spaces
 
 
-class MockRecoveryEnv(gym.Env):
-    """Reduced-order three-layer coupled recovery environment.
+class ProjectRecoveryEnv(gym.Env):
+    """Project-grade reduced-order zonal tri-layer coupled recovery environment.
 
-    State (7-dim):
-      0 communication_recovery_ratio
-      1 power_recovery_ratio (critical-load restoration proxy)
-      2 transportation_accessibility_ratio
-      3 available_repair_resources
-      4 mobile_energy_storage_level
-      5 stage_indicator (0 early, 0.5 middle, 1 late)
-      6 constraint_flag
+    Zones: A, B, C
+    Layers per zone: power P_*, communication C_*, road R_*, critical-load L_*
+    Backbone/global: P0, C0, R0
+
+    Observation index map (continuous, [0,1] except mes_location in [0,2]):
+      0-2   : P_A, P_B, P_C
+      3-5   : C_A, C_B, C_C
+      6-8   : R_A, R_B, R_C
+      9-11  : L_A, L_B, L_C
+      12-14 : P0, C0, R0
+      15    : crew_power_status
+      16    : crew_comm_status
+      17    : crew_road_status
+      18    : mes_location (0=A,1=B,2=C; normalized in state to /2)
+      19    : mes_soc
+      20    : material_stock
+      21    : switching_capability
+      22    : stage_indicator (0 early, 0.5 middle, 1 late)
+      23    : constraint_flag
+
+    Actions (Discrete 14):
+      0-2 road_A/B/C, 3-5 power_A/B/C, 6-8 comm_A/B/C,
+      9-11 mes_to_A/B/C, 12 feeder_reconfigure, 13 coordinated_balanced
     """
 
     metadata = {"render_modes": []}
 
-    def __init__(self, max_steps: int = 40, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        max_steps: int = 60,
+        seed: int | None = None,
+        severity: str = "moderate",
+        reward_weights: dict[str, float] | None = None,
+    ) -> None:
         super().__init__()
         self.max_steps = max_steps
         self.rng = np.random.default_rng(seed)
-        self.action_space = spaces.Discrete(4)
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(7,), dtype=np.float32)
-        self.state = np.zeros(7, dtype=np.float32)
+        self.severity = severity
+
+        self.action_space = spaces.Discrete(14)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(24,), dtype=np.float32)
+
+        self.w = reward_weights or {
+            "delta_power": 0.20,
+            "delta_comm": 0.20,
+            "delta_road": 0.15,
+            "delta_critical_load": 0.20,
+            "synergy_bonus": 0.10,
+            "constraint_penalty": 0.08,
+            "action_switch_penalty": 0.04,
+            "mes_overuse_penalty": 0.03,
+        }
+
+        self.state = np.zeros(24, dtype=np.float32)
         self.step_count = 0
         self.constraint_violation_count = 0
+        self.prev_action = 13
 
-    def _stage_from_progress(self, progress: float) -> tuple[float, str]:
-        if progress < 0.35:
+    def _severity_profile(self) -> tuple[tuple[float, float], float]:
+        if self.severity == "mild":
+            return (0.40, 0.70), 1.00
+        if self.severity == "severe":
+            return (0.05, 0.35), 0.75
+        return (0.20, 0.55), 0.88  # moderate
+
+    def _progress(self, s: np.ndarray) -> float:
+        power = np.mean(np.concatenate([s[0:3], [s[12]]]))
+        comm = np.mean(np.concatenate([s[3:6], [s[13]]]))
+        road = np.mean(np.concatenate([s[6:9], [s[14]]]))
+        return float(0.35 * power + 0.35 * comm + 0.30 * road)
+
+    def _stage(self, s: np.ndarray) -> tuple[float, str]:
+        p = self._progress(s)
+        if p < 0.35:
             return 0.0, "early"
-        if progress < 0.75:
+        if p < 0.75:
             return 0.5, "middle"
         return 1.0, "late"
+
+    def _clip01(self, arr: np.ndarray) -> np.ndarray:
+        return np.clip(arr, 0.0, 1.0)
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         _ = options
         if seed is not None:
             self.rng = np.random.default_rng(seed)
+
         self.step_count = 0
         self.constraint_violation_count = 0
-        comm = self.rng.uniform(0.12, 0.30)
-        power = self.rng.uniform(0.10, 0.28)
-        transport = self.rng.uniform(0.15, 0.40)
-        resources = self.rng.uniform(0.50, 0.85)
-        storage = self.rng.uniform(0.35, 0.75)
-        self.state = np.array([comm, power, transport, resources, storage, 0.0, 0.0], dtype=np.float32)
-        return self.state.copy(), self._build_info(progress_delta=0.0, invalid_action=False, resource_shortage=False)
+        self.prev_action = 13
+
+        rng_range, difficulty = self._severity_profile()
+        low, high = rng_range
+
+        s = np.zeros(24, dtype=np.float32)
+        s[0:3] = self.rng.uniform(low, high, size=3)  # P_A/B/C
+        s[3:6] = self.rng.uniform(low, high, size=3)  # C_A/B/C
+        s[6:9] = self.rng.uniform(low, high, size=3)  # R_A/B/C
+        s[9:12] = self.rng.uniform(low, high, size=3)  # L_A/B/C
+        s[12] = self.rng.uniform(low, high)  # P0
+        s[13] = self.rng.uniform(low, high)  # C0
+        s[14] = self.rng.uniform(low, high)  # R0
+        s[15:18] = self.rng.uniform(0.6, 1.0, size=3) * difficulty  # crew statuses
+        s[18] = self.rng.integers(0, 3) / 2.0  # mes_location normalized
+        s[19] = self.rng.uniform(0.5, 0.9) * difficulty  # mes_soc
+        s[20] = self.rng.uniform(0.5, 0.95) * difficulty  # material_stock
+        s[21] = self.rng.uniform(0.5, 0.9) * difficulty  # switching capability
+        s[22], _ = self._stage(s)
+        s[23] = 0.0
+
+        self.state = self._clip01(s)
+        return self.state.copy(), self._build_info(progress_delta=0.0, invalid_action=False, mes_used=False)
 
     def step(self, action: int):
         action = int(action)
-        comm, power, transport, resources, storage, _stage, _flag = self.state.tolist()
-        old_progress = (comm + power + transport) / 3.0
-        _, stage_name = self._stage_from_progress(old_progress)
+        s_prev = self.state.copy()
+        s = self.state.copy()
 
-        resource_shortage = resources < 0.15 or storage < 0.12
+        P = s[0:3]
+        C = s[3:6]
+        R = s[6:9]
+        L = s[9:12]
+        P0, C0, R0 = float(s[12]), float(s[13]), float(s[14])
+        crew_p, crew_c, crew_r = float(s[15]), float(s[16]), float(s[17])
+        mes_loc = int(round(float(s[18]) * 2))
+        mes_soc = float(s[19])
+        material = float(s[20])
+        switch_cap = float(s[21])
+        stage_val, stage_name = self._stage(s)
+
         invalid_action = False
+        mes_used = False
 
-        # Base gains: [communication, power, transport]
-        if action == 0:  # prioritize communication
-            gains = np.array([0.060, 0.010, 0.005])
-            res_cost, stor_cost = 0.060, 0.020
-        elif action == 1:  # prioritize power
-            gains = np.array([0.010, 0.065, 0.005])
-            res_cost, stor_cost = 0.070, 0.025
-        elif action == 2:  # prioritize transportation
-            gains = np.array([0.005, 0.005, 0.070])
-            res_cost, stor_cost = 0.055, 0.018
-        else:  # balanced/coordinated
-            gains = np.array([0.030, 0.030, 0.030])
-            res_cost, stor_cost = 0.050, 0.020
+        def zone_eff(z: int) -> float:
+            # road improves same-zone repair efficiency + trunk road backbone support.
+            return float(0.45 + 0.40 * R[z] + 0.15 * R0)
 
-        # Coupling 1: Power supports communication.
-        if action == 0 and power < 0.35:
-            gains[0] *= 0.55
+        if 0 <= action <= 2:  # road A/B/C
+            z = action
+            gain = 0.06 * crew_r * (1.0 if stage_name != "late" else 0.75)
+            R[z] += gain + self.rng.normal(0.0, 0.004)
+            R0 += 0.02 * gain
+            material -= 0.03
 
-        # Coupling 2: Transportation supports communication and power restoration.
-        if action in (0, 1) and transport < 0.35:
-            gains[0] *= 0.65
-            gains[1] *= 0.65
-            res_cost *= 1.25
+        elif 3 <= action <= 5:  # power A/B/C
+            z = action - 3
+            eff = zone_eff(z)
+            gain = 0.055 * crew_p * eff
+            if stage_name == "early":
+                gain *= 0.95
+            P[z] += gain + self.rng.normal(0.0, 0.004)
+            L[z] += 0.045 * gain
+            P0 += 0.012 * gain
+            material -= 0.035
 
-        # Coupling 3: High communication improves coordinated recovery.
-        if action == 3 and comm >= 0.60:
-            gains *= 1.20
+        elif 6 <= action <= 8:  # comm A/B/C
+            z = action - 6
+            eff = zone_eff(z)
+            # comm depends on local power or MES support in-zone.
+            power_support = 1.0 if (P[z] >= 0.35 or (mes_loc == z and mes_soc > 0.15)) else 0.6
+            gain = 0.055 * crew_c * eff * power_support
+            C[z] += gain + self.rng.normal(0.0, 0.004)
+            C0 += 0.01 * gain
+            material -= 0.03
 
-        # Stage/resource effects (simple, not over-complicated).
-        if stage_name == "early" and action == 2:
-            gains[2] *= 0.7  # transport-heavy action less effective very early
-            invalid_action = True
+        elif 9 <= action <= 11:  # MES dispatch A/B/C
+            z = action - 9
+            mes_used = True
+            if R[z] < 0.25 or mes_soc < 0.08:
+                invalid_action = True
+                material -= 0.01
+            else:
+                mes_loc = z
+                mes_soc -= 0.06
+                # MES supports local power + critical load
+                P[z] += 0.04
+                L[z] += 0.045
+
+        elif action == 12:  # feeder reconfigure / load transfer
+            # if C0 low, reconfiguration coordination degrades.
+            coord_eff = 0.5 + 0.5 * C0
+            if C0 < 0.30:
+                invalid_action = True
+            transfer = 0.04 * switch_cap * coord_eff
+            weakest = int(np.argmin(L))
+            donor = int(np.argmax(P))
+            L[weakest] += transfer
+            P[donor] -= 0.01 * transfer
+            material -= 0.025
+
+        else:  # 13 coordinated balanced restoration
+            # high C0 and recovered communication improve balanced coordination.
+            coord = (0.55 + 0.30 * C0 + 0.15 * float(np.mean(C)))
+            if stage_name == "middle":
+                coord *= 1.08
+            if stage_name == "late":
+                coord *= 1.05
+            P += 0.018 * coord * np.array([zone_eff(0), zone_eff(1), zone_eff(2)])
+            C += 0.018 * coord * np.array([zone_eff(0), zone_eff(1), zone_eff(2)])
+            R += 0.014 * coord
+            L += 0.016 * coord
+            P0 += 0.01 * coord
+            C0 += 0.01 * coord
+            R0 += 0.008 * coord
+            material -= 0.04
+
+        # resource dynamics
+        material = float(np.clip(material + 0.008, 0.0, 1.0))
+        mes_soc = float(np.clip(mes_soc + 0.006 if not mes_used else mes_soc, 0.0, 1.0))
+        resource_shortage = material < 0.10
         if resource_shortage:
-            gains *= 0.6
-            res_cost *= 1.2
             invalid_action = True
 
-        noise = self.rng.normal(0.0, 0.006, size=3)
-        comm = float(np.clip(comm + gains[0] + noise[0], 0.0, 1.0))
-        power = float(np.clip(power + gains[1] + noise[1], 0.0, 1.0))
-        transport = float(np.clip(transport + gains[2] + noise[2], 0.0, 1.0))
+        # late stage stabilization bonus/penalty logic (simple)
+        if stage_name == "late" and action in (0, 1, 2):
+            invalid_action = True
 
-        resources = float(np.clip(resources - res_cost + 0.012, 0.0, 1.0))
-        storage = float(np.clip(storage - stor_cost + 0.010, 0.0, 1.0))
+        # write back + clamp
+        s[0:3], s[3:6], s[6:9], s[9:12] = P, C, R, L
+        s[12], s[13], s[14] = P0, C0, R0
+        s[18], s[19], s[20] = mes_loc / 2.0, mes_soc, material
 
-        progress = (comm + power + transport) / 3.0
-        stage_value, _ = self._stage_from_progress(progress)
-        constraint_flag = 1.0 if (resource_shortage or invalid_action) else 0.0
-        if constraint_flag > 0.5:
+        s = self._clip01(s)
+        s[22], _ = self._stage(s)
+        s[23] = 1.0 if invalid_action else 0.0
+        if invalid_action:
             self.constraint_violation_count += 1
 
-        self.state = np.array([comm, power, transport, resources, storage, stage_value, constraint_flag], dtype=np.float32)
+        # reward terms
+        dp = float(np.mean(s[0:3] - s_prev[0:3]))
+        dc = float(np.mean(s[3:6] - s_prev[3:6]))
+        dr = float(np.mean(s[6:9] - s_prev[6:9]))
+        dl = float(np.mean(s[9:12] - s_prev[9:12]))
+
+        # synergy: zones with simultaneously high P,C,R
+        synergy = float(np.mean(np.minimum(np.minimum(s[0:3], s[3:6]), s[6:9])))
+        constraint_pen = 1.0 if invalid_action else 0.0
+        switch_pen = 1.0 if action != self.prev_action else 0.0
+        mes_overuse_pen = 1.0 if (mes_used and mes_soc < 0.12) else 0.0
+
+        reward = (
+            self.w["delta_power"] * dp
+            + self.w["delta_comm"] * dc
+            + self.w["delta_road"] * dr
+            + self.w["delta_critical_load"] * dl
+            + self.w["synergy_bonus"] * synergy
+            - self.w["constraint_penalty"] * constraint_pen
+            - self.w["action_switch_penalty"] * switch_pen
+            - self.w["mes_overuse_penalty"] * mes_overuse_pen
+        )
+
+        self.state = s
+        self.prev_action = action
         self.step_count += 1
 
-        progress_delta = float(progress - old_progress)
-        reward = 0.45 * progress_delta + 0.25 * power + 0.20 * comm + 0.10 * transport
-        if invalid_action:
-            reward -= 0.08
-        if resource_shortage:
-            reward -= 0.07
+        progress_prev = self._progress(s_prev)
+        progress_now = self._progress(s)
+        progress_delta = progress_now - progress_prev
 
-        terminated = bool(comm >= 0.95 and power >= 0.95 and transport >= 0.92)
+        terminated = bool(np.mean(s[9:12]) >= 0.92 and progress_now >= 0.90)
         truncated = self.step_count >= self.max_steps
-        info = self._build_info(progress_delta=progress_delta, invalid_action=invalid_action, resource_shortage=resource_shortage)
+
+        info = self._build_info(progress_delta=progress_delta, invalid_action=invalid_action, mes_used=mes_used)
         return self.state.copy(), float(reward), terminated, truncated, info
 
-    def _build_info(self, progress_delta: float, invalid_action: bool, resource_shortage: bool) -> dict[str, Any]:
-        comm, power, transport, resources, _storage, stage_value, flag = self.state.tolist()
-        stage = "early" if stage_value < 0.3 else "middle" if stage_value < 0.8 else "late"
+    def _build_info(self, progress_delta: float, invalid_action: bool, mes_used: bool) -> dict[str, Any]:
+        s = self.state
+        stage_val, stage_name = self._stage(s)
+        weakest_zone = int(np.argmin((s[0:3] + s[3:6] + s[6:9]) / 3.0))
+        zone_map = {0: "A", 1: "B", 2: "C"}
+
         return {
             "progress_delta": float(progress_delta),
             "invalid_action": bool(invalid_action),
-            "resource_shortage": bool(resource_shortage),
-            "stage": stage,
-            "constraint_violation": bool(flag > 0.5),
+            "mes_used": bool(mes_used),
+            "stage": stage_name,
+            "constraint_violation": bool(s[23] > 0.5),
             "constraint_violation_count": int(self.constraint_violation_count),
-            "communication_recovery_ratio": float(comm),
-            "power_recovery_ratio": float(power),
-            "transportation_accessibility_ratio": float(transport),
-            "available_repair_resources": float(resources),
+            "communication_recovery_ratio": float(np.mean(s[3:6])),
+            "power_recovery_ratio": float(np.mean(s[0:3])),
+            "road_recovery_ratio": float(np.mean(s[6:9])),
+            "critical_load_recovery_ratio": float(np.mean(s[9:12])),
+            "backbone_comm_ratio": float(s[13]),
+            "weakest_zone": zone_map[weakest_zone],
+            "weakest_layer": str(np.argmin([np.mean(s[0:3]), np.mean(s[3:6]), np.mean(s[6:9])])),
+            "critical_load_shortfall": float(1.0 - np.mean(s[9:12])),
         }
+
+
+# Backward name alias to avoid breaking existing scripts that still import MockRecoveryEnv.
+MockRecoveryEnv = ProjectRecoveryEnv
