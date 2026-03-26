@@ -2,7 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 .env
-outputs/*.json
-generated/*.py
-!outputs/.gitkeep
-!generated/.gitkeep
+generated/
+outputs/
