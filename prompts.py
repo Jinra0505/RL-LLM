@@ -19,12 +19,16 @@ CODEGEN_PROMPT = """Task mode: {task_mode}, stage: {stage}
 Environment: zonal three-layer coupled recovery (communication, power, transportation) with zones A/B/C.
 Observation schema summary:
 {observation_schema}
+Planning blueprint JSON:
+{planning_json}
 Generate one module that improves policy state representation and intrinsic shaping for this 24D state.
 Prioritize system-level recovery over single-layer gains:
 - critical load recovery and completion progress
 - balanced tri-layer recovery across zones
 - lower invalid actions / constraint violations
-- avoid aggressive actions when prerequisites are weak (e.g., low mes_soc, low backbone_comm, low material)
+- avoid invalid or precondition-violating actions
+- do not overuse feeder/coordinated actions when prerequisites are weak (e.g., low mes_soc, low backbone_comm, low material)
+- prioritize low-violation completion in late-stage finishing
 Only output code with revise_state and intrinsic_reward (no extra dependencies/modules).
 Return JSON keys: file_name, rationale, code, expected_behavior.
 """
@@ -39,6 +43,24 @@ Use stage, weakest layer, weakest zone, critical-load shortfall, backbone_comm_r
 Do not over-prioritize communication-only gains when critical-load shortfall is high.
 Prefer critical_power_priority or coordinated_restoration when system-level completion is blocked.
 Return JSON with: task_mode, confidence, reason, stage.
+"""
+
+PLANNING_PROMPT = """Using the routing context + task_mode + stage, produce a concise shaping planning JSON.
+Required keys:
+- weakest_layer
+- weakest_zone
+- late_stage_risk
+- violation_risk
+- should_reward (array)
+- should_penalize (array)
+- should_avoid (array)
+- finishing_strategy
+- codegen_guidance
+Planning constraints:
+- avoid invalid or precondition-violating actions
+- avoid overusing feeder/coordinated actions when prerequisites are weak
+- prioritize low-violation completion and targeted finishing actions on weakest layer/zone
+Return JSON only.
 """
 
 FEEDBACK_PROMPT = """Given candidate metrics, return JSON with:

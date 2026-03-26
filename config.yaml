@@ -16,7 +16,7 @@ scenario:
 
 env:
   name: project_recovery
-  max_steps: 60
+  max_steps: 90
   topology:
     zones: [A, B, C]
     backbone_nodes: [P0, C0, R0]
@@ -54,6 +54,14 @@ training:
 selection:
   higher_is_better: true
   task_mode_metric_weights:
+    __global__:
+      eval_success_rate: 0.40
+      critical_load_recovery_ratio: 0.25
+      min_recovery_ratio: 0.20
+      constraint_violation_rate_eval: -0.35
+      mean_progress_delta_eval: 0.08
+      late_stage_targeted_action_rate: 0.08
+  mode_reference_weights:
     road_opening_priority:
       success_rate: 0.35
       critical_load_recovery_ratio: 0.2

@@ -87,6 +87,31 @@ class LLMClient:
                     "stage": stages[sample_idx % len(stages)],
                 }
             )
+        if response_kind == "planning":
+            return json.dumps(
+                {
+                    "weakest_layer": "power",
+                    "weakest_zone": "B",
+                    "late_stage_risk": "coordinated_overuse_when_prerequisites_weak",
+                    "violation_risk": "invalid_mes_or_feeder_actions_under_low_resources",
+                    "should_reward": [
+                        "weakest-layer targeted gains",
+                        "weakest-zone targeted gains",
+                        "late-stage low-violation finishing",
+                    ],
+                    "should_penalize": [
+                        "invalid_action",
+                        "constraint_violation",
+                        "late-stage coordinated action overuse",
+                    ],
+                    "should_avoid": [
+                        "feeder/coordinated actions when backbone_comm, material, or mes_soc are weak",
+                        "late-stage road-first detours",
+                    ],
+                    "finishing_strategy": "close weakest gaps first, then finish with low-violation targeted actions",
+                    "codegen_guidance": "Use concise reward terms that prioritize high completion with low violation and discourage risky late-stage coordinated actions.",
+                }
+            )
         if response_kind == "feedback":
             return json.dumps(
                 {
@@ -202,7 +227,7 @@ def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
         return base if base.endswith("/v1") else f"{base}/v1"
 
     def _select_model(self, response_kind: str) -> str:
-        if response_kind in {"router", "feedback"}:
+        if response_kind in {"router", "planning", "feedback"}:
             return self.reasoner_model or self.chat_model
         return self.chat_model
 
