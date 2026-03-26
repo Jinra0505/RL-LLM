@@ -1,0 +1,29 @@
+{
+  "timestamp_utc": "2026-03-26T13:38:26.712125Z",
+  "env": {
+    "has_deepseek_api_key": true,
+    "deepseek_base_url_set": true,
+    "deepseek_base_url": "https://api.deepseek.com"
+  },
+  "curl": {
+    "attempted": true,
+    "http_status": "200",
+    "valid_json": true,
+    "assistant_content_present": true,
+    "assistant_content": "OK",
+    "assistant_ok_or_close": true,
+    "curl_exit_code": 0,
+    "stderr_nonempty": false
+  },
+  "python_sdk": {
+    "attempted": true,
+    "success": false,
+    "error_type": "ModuleNotFoundError",
+    "error": "No module named 'openai'"
+  },
+  "comparison": {
+    "curl_success": true,
+    "python_sdk_success": false,
+    "most_likely_difference_if_mismatch": "Python OpenAI SDK path/config issue (e.g., base_url suffix /v1 handling, package/runtime behavior, or SDK request formatting), since raw curl POST works."
+  }
+}
