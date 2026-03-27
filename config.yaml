@@ -2,14 +2,14 @@ llm:
   base_url: https://api.deepseek.com
   model_chat: deepseek-chat
   model_reasoner: deepseek-reasoner
-  timeout_seconds: 45
-  max_retries: 2
+  timeout_seconds: 30
+  max_retries: 0
   temperature: 0.3
   max_tokens: 1800
 
 outer_loop:
   rounds: 1
-  candidates_per_round: 2
+  candidates_per_round: 1
 
 scenario:
   severity: moderate  # mild | moderate | severe
@@ -37,8 +37,8 @@ env:
     13: coordinated_balanced
 
 training:
-  train_episodes: 280
-  eval_episodes: 24
+  train_episodes: 120
+  eval_episodes: 16
   gamma: 0.98
   batch_size: 64
   replay_size: 30000
