@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+generated/
+
+# Keep formal outputs tracked, ignore transient debug/check artifacts.
+outputs/debug_checks/
+outputs/**/run_*/
