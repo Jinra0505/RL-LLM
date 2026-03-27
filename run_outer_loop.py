@@ -191,7 +191,7 @@ def collect_routing_context(
 
     enough_previous = all(
         k in previous_metrics
-        for k in ["communication_recovery_ratio", "power_recovery_ratio", "road_recovery_ratio", "constraint_violation_count"]
+        for k in ["communication_recovery_ratio", "power_recovery_ratio", "road_recovery_ratio", "constraint_violation_rate_eval"]
     )
     if enough_previous:
         env_summary = {
@@ -207,10 +207,10 @@ def collect_routing_context(
             "constraint_violation_count": int(previous_metrics.get("constraint_violation_count", 0)),
         }
         trajectory_summary = {
-            "mean_progress_delta": float(previous_metrics.get("mean_progress_delta", 0.0)),
-            "invalid_action_rate": float(previous_metrics.get("invalid_action_rate", 0.0)),
-            "constraint_violation_rate": float(previous_metrics.get("constraint_violation_rate", 0.0)),
-            "stage_distribution": dict(previous_metrics.get("stage_distribution", {})),
+            "mean_progress_delta": float(previous_metrics.get("mean_progress_delta_eval", previous_metrics.get("mean_progress_delta", 0.0))),
+            "invalid_action_rate": float(previous_metrics.get("invalid_action_rate_eval", previous_metrics.get("invalid_action_rate", 0.0))),
+            "constraint_violation_rate": float(previous_metrics.get("constraint_violation_rate_eval", previous_metrics.get("constraint_violation_rate", 0.0))),
+            "stage_distribution": dict(previous_metrics.get("stage_distribution_eval", previous_metrics.get("stage_distribution", {}))),
             "action_category_distribution": _aggregate_action_category_distribution(dict(previous_metrics.get("action_usage", {}))),
             "weakest_zone_frequency": dict(previous_metrics.get("weakest_zone_frequency", {})),
             "source": "previous_metrics",
@@ -470,6 +470,8 @@ def main() -> None:
         summary = {
             "round": round_idx + 1,
             "route": route,
+            "planning": planning_json,
+            "planning_repaired_from_raw": planning_repaired,
             "best_metric": "selection_score",
             "best_value": best_candidate["metrics"].get("selection_score"),
             "best_candidate": best_candidate,

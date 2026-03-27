@@ -1,142 +1,80 @@
-# RL+LLM Tri-Layer Recovery Project (Experiment-Ready)
+# RL+LLM Tri-Layer Recovery (Current v4 State)
 
-This repository implements a lightweight but project-grade RL+LLM workflow for post-disaster coordinated recovery:
+This repository implements a **tri-layer (power/communication/road) restoration environment** with a practical RL+LLM outer loop for shaping-function search.
 
-`run_outer_loop.py -> router.py/llm_client.py -> generated candidate module -> train_rl.py -> outputs`
+## 1) Project goal
+- Train and evaluate restoration policies in a coupled multi-zone environment.
+- Use an LLM outer loop to generate `revise_state` / `intrinsic_reward` modules.
+- Keep results auditable via saved routing/planning/candidate/metrics artifacts.
 
-## Environment: explicit zonal three-layer coupled recovery
+## 2) Environment (tri-layer, 3 zones)
+`mock_recovery_env.py::ProjectRecoveryEnv`
+- Zones: A/B/C
+- Layers: power, communication, road
+- Plus critical load, backbone status, crews, MES state, material, switching, stage, constraint flag
+- Action space: 14 discrete actions (per-zone repair + MES + feeder + coordinated)
 
-`mock_recovery_env.py` now provides `ProjectRecoveryEnv`, a reduced-order but explicit model with:
+## 3) RL+LLM main flow
+Main script: `run_outer_loop.py`
 
-- 3 zones: **A, B, C**
-- 3 layers per zone:
-  - power restoration (`P_A,P_B,P_C`)
-  - communication restoration (`C_A,C_B,C_C`)
-  - road accessibility (`R_A,R_B,R_C`)
-- backbone states: `P0, C0, R0`
-- critical-load states: `L_A, L_B, L_C`
-- process/resource states:
-  - crew status (power/comm/road)
-  - MES location + SOC
-  - material stock
-  - switching capability
-  - stage indicator
-  - constraint flag
+Current real-mode workflow:
 
-Action space: 14 discrete actions
-- 0-2 road restoration A/B/C
-- 3-5 power restoration A/B/C
-- 6-8 communication restoration A/B/C
-- 9-11 MES dispatch A/B/C
-- 12 feeder reconfiguration / load transfer
-- 13 coordinated balanced restoration
+`route -> planning(reasoner) -> codegen(chat) -> validate -> train -> select -> feedback`
 
-## Coupling rules (implemented)
+- Router/planning/feedback requests use reasoner model routing.
+- Codegen requests use chat model routing.
+- Candidate code must export:
+  - `revise_state(state, info=None)`
+  - `intrinsic_reward(state, action, next_state, info=None, revised_state=None)`
 
-1. **Road -> power/comm repair efficiency** in same zone.
-2. **Communication depends on power or MES support** in-zone.
-3. **Low C0 reduces feeder/coordinated effectiveness**.
-4. **MES dispatch requires road and consumes SOC**.
-5. Stage-aware tendencies:
-   - early: trunk/backbone and access opening are important,
-   - middle: coordinated zonal restoration is efficient,
-   - late: stabilization and constraint reduction are favored.
+## 4) LLM modes and model routing
+Supported modes:
+- `--llm-mode mock`
+- `--llm-mode real`
+- `--llm-mode auto`
 
-Stage progression uses weighted progress:
+Config keys (`config.yaml`) and env vars are aligned:
+- `llm.model_chat` -> `DEEPSEEK_MODEL_CHAT`
+- `llm.model_reasoner` -> `DEEPSEEK_MODEL_REASONER`
+- `llm.base_url` -> `DEEPSEEK_BASE_URL`
 
-`progress = 0.35*mean(power) + 0.35*mean(comm) + 0.30*mean(road)`
-
-## Reward design
-
-`reward = 0.20*delta_power + 0.20*delta_comm + 0.15*delta_road + 0.20*delta_critical_load + 0.10*synergy_bonus - 0.08*constraint_penalty - 0.04*action_switch_penalty - 0.03*mes_overuse_penalty`
-
-## Trainer
-
-`train_rl.py` uses a lightweight DQN (PyTorch):
-- MLP Q-network + target network
-- replay buffer
-- epsilon-greedy
-- train/eval split
-- JSON output metrics + action usage
-
-`revise_state` really affects policy learning: policy input is built from revised state (`_effective_state`).
-
-## Task modes
-
-Available modes:
-- road_opening_priority
-- critical_power_priority
-- backbone_comm_priority
-- coordinated_restoration
-- stabilization_priority
-
-Router uses stage + weakest layer + weakest zone + critical-load shortfall + violation frequency.
-
-## Experiments
-
+## 5) Repro commands (v4-sized)
 Install:
 ```bash
 pip install -r requirements.txt
 ```
 
-LLM modes:
-- `--llm-mode mock`: force deterministic local mock responses (no API call)
-- `--llm-mode real`: force real DeepSeek API calls (requires API key)
-- `--llm-mode auto`: real if key is present, otherwise mock
-
-### Experiment 1: baseline_noop vs RL+LLM
-
-Baseline (no-op shaping):
+Baseline v4 check:
 ```bash
-python train_rl.py --env project_recovery --llm-mode mock --task-mode coordinated_restoration --revise-module baseline_noop.py --output outputs/exp1_baseline.json
+python train_rl.py --env project_recovery --llm-mode real --task-mode coordinated_restoration --revise-module baseline_noop.py --config config.yaml --output outputs/exp1_baseline_realcheck_v4.json
 ```
 
-RL+LLM outer loop:
+Real outer-loop v4-style run:
 ```bash
-python run_outer_loop.py --env project_recovery --llm-mode mock
+python run_outer_loop.py --env project_recovery --llm-mode real --router-mode llm --config config.yaml
 ```
 
-Baseline (no LLM shaping, trainer compatibility check):
-```bash
-python train_rl.py --env project_recovery --llm-mode real --task-mode coordinated_restoration --revise-module baseline_noop.py --output outputs/exp1_baseline_realcheck.json
-```
+## 6) Formal outputs vs debug artifacts
+### Formal outputs (current v4)
+- `outputs/exp1_baseline_realcheck_v4.json`
+- `outputs/real_outer_loop_v4/outer_loop_final_summary.json`
+- `outputs/real_outer_loop_v4/round_1/summary.json`
+- `outputs/real_outer_loop_v4/round_1/r1_c1/metrics.json`
+- `outputs/real_outer_loop_v4/round_1/r1_c2/metrics.json`
+- `outputs/model_diagnosis_v4.md`
+- `outputs/model_improvement_report_v4.md`
 
-### Experiment 3: severity / task-mode comparison
+### Debug / connectivity artifacts
+- `outputs/debug_checks/*.json`
 
-Change severity in `config.yaml` (`mild`, `moderate`, `severe`) and rerun:
-```bash
-python run_outer_loop.py --env project_recovery --llm-mode mock --router-mode rule
-```
+These debug files are for SDK/API diagnostics and should not be mixed with formal performance conclusions.
 
-You can also pin task mode:
-```bash
-python run_outer_loop.py --env project_recovery --llm-mode mock --fixed-task-mode backbone_comm_priority
-```
+## 7) How to interpret current results (credibility note)
+- v4 real-mode pipeline is functional and can achieve strong completion/recovery behavior in many runs.
+- Constraint-violation control remains a key optimization target.
+- **Important:** v2/v3/v4 success-rate changes are not purely policy-quality effects. Interpretation must account for:
+  1. success-rate statistic correction to `eval_success_rate`,
+  2. increased `max_steps`,
+  3. relaxed done/termination thresholds.
 
-## Outputs
-
-- Per-run summaries: `outputs/run_*/outer_loop_final_summary.json`
-- Per-candidate metrics: `outputs/run_*/round_*/r*_c*/metrics.json`
-- Candidate training detail: `outputs/run_*/round_*/r*_c*/training_result.json`
-- Formal checked artifacts used in this repo:
-  - baseline: `outputs/exp1_baseline_realcheck.json`
-  - real outer-loop: `outputs/real_outer_loop_smoke/`
-- Debug connectivity/SDK checks are kept under: `outputs/debug_checks/`
-
-## Repository status
-
-This repository is cleaned to keep only the RL+LLM tri-layer recovery mainline modules and minimal supporting files.
-
-Optional real DeepSeek:
-```bash
-export DEEPSEEK_API_KEY=your_real_key
-export DEEPSEEK_BASE_URL=https://api.deepseek.com
-export DEEPSEEK_MODEL_CHAT=deepseek-chat
-export DEEPSEEK_MODEL_REASONER=deepseek-reasoner
-python run_outer_loop.py --env project_recovery --llm-mode real
-```
-
-`llm_client.py` model routing:
-- `response_kind=chat` -> `DEEPSEEK_MODEL_CHAT`
-- `response_kind in {router, feedback}` -> `DEEPSEEK_MODEL_REASONER` (fallback to chat model)
-- `response_kind=codegen` -> `DEEPSEEK_MODEL_CHAT` (for higher code JSON completion stability)
+So cross-version conclusions should emphasize **recovery ratios, violation metrics, and late-stage behavior**, not only raw success-rate.

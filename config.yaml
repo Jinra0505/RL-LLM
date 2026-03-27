@@ -61,39 +61,6 @@ selection:
       constraint_violation_rate_eval: -0.35
       mean_progress_delta_eval: 0.08
       late_stage_targeted_action_rate: 0.08
-  mode_reference_weights:
-    road_opening_priority:
-      success_rate: 0.35
-      critical_load_recovery_ratio: 0.2
-      road_recovery_ratio: 0.2
-      constraint_violation_rate_eval: -0.25
-      cumulative_reward_mean: 0.1
-    critical_power_priority:
-      success_rate: 0.35
-      critical_load_recovery_ratio: 0.35
-      power_recovery_ratio: 0.2
-      constraint_violation_rate_eval: -0.2
-      cumulative_reward_mean: 0.1
-    backbone_comm_priority:
-      success_rate: 0.3
-      critical_load_recovery_ratio: 0.2
-      communication_recovery_ratio: 0.2
-      backbone_comm_ratio: 0.1
-      constraint_violation_rate_eval: -0.25
-      cumulative_reward_mean: 0.05
-    coordinated_restoration:
-      success_rate: 0.4
-      critical_load_recovery_ratio: 0.2
-      communication_recovery_ratio: 0.15
-      power_recovery_ratio: 0.2
-      road_recovery_ratio: 0.15
-      constraint_violation_rate_eval: -0.15
-      cumulative_reward_mean: 0.05
-    stabilization_priority:
-      success_rate: 0.2
-      constraint_violation_rate_eval: -0.55
-      critical_load_recovery_ratio: 0.2
-      cumulative_reward_mean: 0.05
 
 reward_weights:
   delta_power: 0.20

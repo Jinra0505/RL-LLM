@@ -363,6 +363,8 @@ def run_training(
     eval_action_usage = {str(i): 0 for i in range(action_dim)}
     eval_stage_counts: Counter[str] = Counter()
     eval_invalid_reason_counts: Counter[str] = Counter()
+    eval_weakest_zone_counts: Counter[str] = Counter()
+    eval_weakest_layer_counts: Counter[str] = Counter()
     late_stage_steps_total = 0
     late_stage_targeted_steps = 0
     late_stage_coordinated_steps = 0
@@ -400,6 +402,8 @@ def run_training(
             ep_progress.append(float(info.get("progress_delta", 0.0)))
             ep_stage.append(float(info.get("stage_indicator", 0.0)))
             eval_stage_counts[str(info.get("stage", "unknown"))] += 1
+            eval_weakest_zone_counts[str(info.get("weakest_zone", "A"))] += 1
+            eval_weakest_layer_counts[str(info.get("weakest_layer", "0"))] += 1
             if str(info.get("stage", "middle")) == "late":
                 late_stage_steps_total += 1
                 if a in {3, 4, 5, 6, 7, 8}:
@@ -505,6 +509,7 @@ def run_training(
         "invalid_action_rate": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
         "invalid_action_rate_eval": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
         "mean_progress_delta_eval": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
+        "mean_progress_delta": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
         "mean_stage_indicator_eval": float(np.mean(eval_stage_indicators)) if eval_stage_indicators else 0.0,
         "backbone_comm_ratio": float(np.mean(eval_backbone_comm)) if eval_backbone_comm else 0.0,
         "backbone_power_ratio": float(np.mean(eval_backbone_power)) if eval_backbone_power else 0.0,
@@ -546,7 +551,13 @@ def run_training(
         "dominant_action_category": dominant_action_category,
         "late_stage_targeted_action_rate": float(late_stage_targeted_steps) / float(max(1, late_stage_steps_total)),
         "late_stage_coordinated_action_rate": float(late_stage_coordinated_steps) / float(max(1, late_stage_steps_total)),
+        "weakest_zone": max(eval_weakest_zone_counts.items(), key=lambda kv: kv[1])[0] if eval_weakest_zone_counts else "A",
+        "weakest_layer": max(eval_weakest_layer_counts.items(), key=lambda kv: kv[1])[0] if eval_weakest_layer_counts else "0",
+        "weakest_zone_frequency": dict(eval_weakest_zone_counts),
         "stage_distribution_eval": {
+            k: v / float(max(1, sum(eval_stage_counts.values()))) for k, v in eval_stage_counts.items()
+        },
+        "stage_distribution": {
             k: v / float(max(1, sum(eval_stage_counts.values()))) for k, v in eval_stage_counts.items()
         },
         "invalid_reason_counts_eval": dict(eval_invalid_reason_counts),
