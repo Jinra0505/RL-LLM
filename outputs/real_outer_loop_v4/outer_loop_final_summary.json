@@ -646,6 +646,8 @@
       "avoid_patterns": [
         "over-focusing transport in early recovery"
       ]
-    }
+    },
+    "best_candidate_id": "r1_c1",
+    "best_candidate_path": "generated/generated_candidate_mock_0.py"
   }
 ]

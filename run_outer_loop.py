@@ -5,6 +5,7 @@ import ast
 import importlib.util
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ import yaml
 
 from llm_client import LLMClient
 from mock_recovery_env import ProjectRecoveryEnv
-from prompts import CODEGEN_PROMPT, FEEDBACK_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
+from prompts import CODEGEN_PROMPT, FEEDBACK_PROMPT, PLANNING_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
 from router import route_llm, route_rule, summarize_trajectory
 from train_rl import run_training
 
@@ -30,6 +31,18 @@ def parse_json_with_repair(raw: str) -> tuple[dict[str, Any], bool]:
     try:
         return json.loads(raw), False
     except json.JSONDecodeError:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+            try:
+                return json.loads(cleaned), True
+            except json.JSONDecodeError:
+                pass
         s = raw.find("{")
         e = raw.rfind("}")
         if s != -1 and e != -1 and e > s:
@@ -178,7 +191,7 @@ def collect_routing_context(
 
     enough_previous = all(
         k in previous_metrics
-        for k in ["communication_recovery_ratio", "power_recovery_ratio", "road_recovery_ratio", "constraint_violation_count"]
+        for k in ["communication_recovery_ratio", "power_recovery_ratio", "road_recovery_ratio", "constraint_violation_rate_eval"]
     )
     if enough_previous:
         env_summary = {
@@ -194,10 +207,10 @@ def collect_routing_context(
             "constraint_violation_count": int(previous_metrics.get("constraint_violation_count", 0)),
         }
         trajectory_summary = {
-            "mean_progress_delta": float(previous_metrics.get("mean_progress_delta", 0.0)),
-            "invalid_action_rate": float(previous_metrics.get("invalid_action_rate", 0.0)),
-            "constraint_violation_rate": float(previous_metrics.get("constraint_violation_rate", 0.0)),
-            "stage_distribution": dict(previous_metrics.get("stage_distribution", {})),
+            "mean_progress_delta": float(previous_metrics.get("mean_progress_delta_eval", previous_metrics.get("mean_progress_delta", 0.0))),
+            "invalid_action_rate": float(previous_metrics.get("invalid_action_rate_eval", previous_metrics.get("invalid_action_rate", 0.0))),
+            "constraint_violation_rate": float(previous_metrics.get("constraint_violation_rate_eval", previous_metrics.get("constraint_violation_rate", 0.0))),
+            "stage_distribution": dict(previous_metrics.get("stage_distribution_eval", previous_metrics.get("stage_distribution", {}))),
             "action_category_distribution": _aggregate_action_category_distribution(dict(previous_metrics.get("action_usage", {}))),
             "weakest_zone_frequency": dict(previous_metrics.get("weakest_zone_frequency", {})),
             "source": "previous_metrics",
@@ -269,6 +282,16 @@ def build_feedback(best_candidate: dict[str, Any], score_metric: str) -> dict[st
     }
 
 
+def build_planning_payload(route: dict[str, Any], routing_context: dict[str, Any], previous_feedback: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "task_mode": str(route.get("task_mode", "coordinated_restoration")),
+        "stage": str(route.get("stage", "middle")),
+        "route_reason": str(route.get("reason", "")),
+        "routing_context": routing_context,
+        "latest_feedback": previous_feedback or {},
+    }
+
+
 def select_best(results: list[dict[str, Any]], metric: str, higher_is_better: bool) -> dict[str, Any]:
     return sorted(results, key=lambda x: x.get(metric, 0.0), reverse=higher_is_better)[0]
 
@@ -294,6 +317,14 @@ def main() -> None:
     outputs_root = Path(cfg["paths"]["outputs_dir"])
     generated_dir.mkdir(parents=True, exist_ok=True)
     outputs_root.mkdir(parents=True, exist_ok=True)
+
+    llm_cfg = cfg.get("llm", {})
+    if llm_cfg.get("model_chat") and not os.getenv("DEEPSEEK_MODEL_CHAT"):
+        os.environ["DEEPSEEK_MODEL_CHAT"] = str(llm_cfg["model_chat"])
+    if llm_cfg.get("model_reasoner") and not os.getenv("DEEPSEEK_MODEL_REASONER"):
+        os.environ["DEEPSEEK_MODEL_REASONER"] = str(llm_cfg["model_reasoner"])
+    if llm_cfg.get("base_url") and not os.getenv("DEEPSEEK_BASE_URL"):
+        os.environ["DEEPSEEK_BASE_URL"] = str(llm_cfg["base_url"])
 
     client = LLMClient(
         mode=args.llm_mode,
@@ -333,6 +364,22 @@ def main() -> None:
         round_dir = run_dir / f"round_{round_idx+1}"
         round_dir.mkdir(parents=True, exist_ok=True)
         (round_dir / "route.json").write_text(json.dumps(route, indent=2), encoding="utf-8")
+        planning_payload = build_planning_payload(
+            route=route,
+            routing_context=routing_context,
+            previous_feedback=(history[-1].get("llm_feedback", {}) if history else None),
+        )
+        planning_raw = client.chat(
+            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": PLANNING_PROMPT + "\n\n" + json.dumps(planning_payload, indent=2)}],
+            response_kind="planning",
+            sample_idx=round_idx,
+        )
+        planning_json, planning_repaired = parse_json_with_repair(planning_raw)
+        (round_dir / "planning_raw.txt").write_text(planning_raw, encoding="utf-8")
+        (round_dir / "planning.json").write_text(
+            json.dumps({"payload": planning_payload, "planning": planning_json, "repaired_from_raw": planning_repaired}, indent=2),
+            encoding="utf-8",
+        )
 
         round_candidates: list[dict[str, Any]] = []
         for sample_idx in range(candidates_per_round):
@@ -340,14 +387,36 @@ def main() -> None:
             cdir = round_dir / cid
             cdir.mkdir(parents=True, exist_ok=True)
 
-            prompt = CODEGEN_PROMPT.format(task_mode=route["task_mode"], stage=route["stage"], observation_schema=str(cfg["env"]))
+            prompt = CODEGEN_PROMPT.format(
+                task_mode=route["task_mode"],
+                stage=route["stage"],
+                observation_schema=str(cfg["env"]),
+                planning_json=json.dumps(planning_json, indent=2, ensure_ascii=False),
+            )
+            prompt += "\n\nReturn compact JSON and keep generated code concise (<= 80 lines)."
             if history:
                 prompt += "\n\nLatest feedback:\n" + json.dumps(history[-1].get("feedback_payload", {}), indent=2)
-
-            raw = client.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}], response_kind="codegen", sample_idx=sample_idx + round_idx * 10)
-            parsed, repaired = parse_json_with_repair(raw)
-            report = validate_candidate_payload(parsed)
-            report["repaired_from_raw"] = repaired
+            raw = "{}"
+            parsed: dict[str, Any] = {}
+            repaired = True
+            report: dict[str, Any] = {"valid": False, "errors": ["not attempted"], "normalized_payload": {}}
+            for attempt in range(2):
+                attempt_prompt = prompt
+                if attempt > 0:
+                    attempt_prompt += (
+                        "\n\nPrevious output was invalid. Respond with ONLY one JSON object with keys: "
+                        "file_name, rationale, code, expected_behavior."
+                    )
+                raw = client.chat(
+                    [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": attempt_prompt}],
+                    response_kind="codegen",
+                    sample_idx=sample_idx + round_idx * 10 + attempt,
+                )
+                parsed, repaired = parse_json_with_repair(raw)
+                report = validate_candidate_payload(parsed)
+                report["repaired_from_raw"] = repaired
+                if report["valid"]:
+                    break
 
             (cdir / "prompt.txt").write_text(prompt, encoding="utf-8")
             (cdir / "raw_response.txt").write_text(raw, encoding="utf-8")
@@ -401,8 +470,12 @@ def main() -> None:
         summary = {
             "round": round_idx + 1,
             "route": route,
+            "planning": planning_json,
+            "planning_repaired_from_raw": planning_repaired,
             "best_metric": "selection_score",
             "best_value": best_candidate["metrics"].get("selection_score"),
+            "best_candidate_id": str(best_candidate.get("candidate_id", "")),
+            "best_candidate_path": str(best_candidate.get("candidate_path", "")),
             "best_candidate": best_candidate,
             "feedback_payload": feedback_payload,
             "llm_feedback": feedback_json,
