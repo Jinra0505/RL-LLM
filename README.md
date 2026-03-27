@@ -32,6 +32,7 @@ Current two-stage LLM loop:
 - `outputs/real_outer_loop_v4/round_1/summary.json`
 - `outputs/real_outer_loop_v4/round_1/r1_c1/metrics.json`
 - `outputs/real_outer_loop_v4/round_1/r1_c2/metrics.json`
+- `outputs/model_improvement_report_v4.md`
 
 ### Debug artifacts
 No debug artifacts are currently tracked. If temporary API/SDK checks are needed, place them under `outputs/debug_checks/` and avoid mixing them with formal results.

@@ -21,7 +21,7 @@ Route:
 - confidence: **0.84**
 - stage: **middle**
 
-Best candidate (from `summary.json.best_candidate.candidate_id`): **r1_c1**
+Best candidate (from `summary.json.best_candidate_id`): **r1_c1**
 - r1_c1 selection_score: **0.4660**
 - success_rate (eval): **0.0**
 - power/comm/road recovery: **0.5775 / 0.4466 / 0.5306**

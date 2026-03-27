@@ -474,6 +474,8 @@ def main() -> None:
             "planning_repaired_from_raw": planning_repaired,
             "best_metric": "selection_score",
             "best_value": best_candidate["metrics"].get("selection_score"),
+            "best_candidate_id": str(best_candidate.get("candidate_id", "")),
+            "best_candidate_path": str(best_candidate.get("candidate_path", "")),
             "best_candidate": best_candidate,
             "feedback_payload": feedback_payload,
             "llm_feedback": feedback_json,

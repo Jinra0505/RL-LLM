@@ -84,3 +84,5 @@ task_modes:
 paths:
   generated_dir: generated
   outputs_dir: outputs
+  formal_baseline_result: outputs/exp1_baseline_realcheck_v4.json
+  formal_outer_loop_dir: outputs/real_outer_loop_v4

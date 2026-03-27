@@ -23,6 +23,7 @@ This cleanup focused on repository hygiene and output clarity (no new training r
 - `outputs/real_outer_loop_v4/round_1/summary.json`
 - `outputs/real_outer_loop_v4/round_1/r1_c1/metrics.json`
 - `outputs/real_outer_loop_v4/round_1/r1_c2/metrics.json`
+- `outputs/model_improvement_report_v4.md`
 
 ## 3) Removed stale/debug/duplicate artifacts
 - Removed old run directory copy:
@@ -36,3 +37,4 @@ This cleanup focused on repository hygiene and output clarity (no new training r
 - Keep only one current formal result set under `outputs/real_outer_loop_v4/`.
 - Do not keep duplicated `run_*` snapshots once formal summaries/metrics are extracted.
 - Keep transient diagnostics out of formal outputs; if needed later, place under `outputs/debug_checks/` temporarily.
+- Keep round/final summary schema consistent (`best_candidate_id`, `best_candidate_path`) for easier downstream parsing.
