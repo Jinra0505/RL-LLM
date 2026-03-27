@@ -75,6 +75,17 @@ def route_llm(client: LLMClient, system_prompt: str, router_prompt: str, routing
     for key in ["task_mode", "confidence", "reason", "stage"]:
         if key not in route:
             raise ValueError(f"Router response missing key: {key}")
+    env = routing_context.get("env_summary", {})
+    shortfall = float(env.get("critical_load_shortfall", 1.0))
+    power_ratio = float(env.get("power_recovery_ratio", 0.0))
+    comm_ratio = float(env.get("communication_recovery_ratio", 0.0))
+    violate_rate = float(routing_context.get("trajectory_summary", {}).get("constraint_violation_rate", 0.0))
+    if shortfall > 0.42 and power_ratio <= comm_ratio:
+        route["task_mode"] = "critical_power_priority"
+        route["reason"] = "Overridden: critical-load shortfall is high and power lags communication."
+    elif violate_rate > 0.28:
+        route["task_mode"] = "stabilization_priority"
+        route["reason"] = "Overridden: violation rate is high; prioritize stabilization."
     if route["task_mode"] not in TASKS:
         route["task_mode"] = "coordinated_restoration"
     return route

@@ -28,7 +28,9 @@ class LLMClient:
 
         self.api_key = os.getenv("DEEPSEEK_API_KEY")
         self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        legacy_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.chat_model = os.getenv("DEEPSEEK_MODEL_CHAT", legacy_model)
+        self.reasoner_model = os.getenv("DEEPSEEK_MODEL_REASONER", self.chat_model)
 
         if self.mode == "real" and not self.api_key:
             raise RuntimeError("--llm-mode real selected but DEEPSEEK_API_KEY is not set.")
@@ -42,13 +44,25 @@ class LLMClient:
     def chat(self, messages: list[dict[str, str]], response_kind: str = "chat", sample_idx: int = 0) -> str:
         if self.using_mock:
             return self._mock_response(response_kind=response_kind, sample_idx=sample_idx)
-        return self._real_chat(messages)
+        return self._real_chat(messages, response_kind=response_kind)
 
     def chat_json(self, messages: list[dict[str, str]], response_kind: str = "chat", sample_idx: int = 0) -> dict[str, Any]:
         raw = self.chat(messages, response_kind=response_kind, sample_idx=sample_idx)
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.splitlines()
+                if lines and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                cleaned = "\n".join(lines).strip()
+                try:
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    pass
             start = raw.find("{")
             end = raw.rfind("}")
             if start != -1 and end != -1 and end > start:
@@ -71,6 +85,31 @@ class LLMClient:
                     "confidence": 0.74 + 0.02 * (sample_idx % 6),
                     "reason": "Deterministic mock route for current tri-layer restoration task.",
                     "stage": stages[sample_idx % len(stages)],
+                }
+            )
+        if response_kind == "planning":
+            return json.dumps(
+                {
+                    "weakest_layer": "power",
+                    "weakest_zone": "B",
+                    "late_stage_risk": "coordinated_overuse_when_prerequisites_weak",
+                    "violation_risk": "invalid_mes_or_feeder_actions_under_low_resources",
+                    "should_reward": [
+                        "weakest-layer targeted gains",
+                        "weakest-zone targeted gains",
+                        "late-stage low-violation finishing",
+                    ],
+                    "should_penalize": [
+                        "invalid_action",
+                        "constraint_violation",
+                        "late-stage coordinated action overuse",
+                    ],
+                    "should_avoid": [
+                        "feeder/coordinated actions when backbone_comm, material, or mes_soc are weak",
+                        "late-stage road-first detours",
+                    ],
+                    "finishing_strategy": "close weakest gaps first, then finish with low-violation targeted actions",
+                    "codegen_guidance": "Use concise reward terms that prioritize high completion with low violation and discourage risky late-stage coordinated actions.",
                 }
             )
         if response_kind == "feedback":
@@ -183,24 +222,46 @@ def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
             }
         )
 
-    def _real_chat(self, messages: list[dict[str, str]]) -> str:
-        from openai import OpenAI
+    def _normalize_base_url(self) -> str:
+        base = self.base_url.rstrip("/")
+        return base if base.endswith("/v1") else f"{base}/v1"
 
-        client = OpenAI(api_key=self.api_key, base_url=f"{self.base_url.rstrip('/')}/v1", timeout=self.timeout_seconds)
+    def _select_model(self, response_kind: str) -> str:
+        if response_kind in {"router", "planning", "feedback"}:
+            return self.reasoner_model or self.chat_model
+        return self.chat_model
+
+    def _real_chat(self, messages: list[dict[str, str]], response_kind: str = "chat") -> str:
+        try:
+            from openai import OpenAI
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "missing openai dependency: install requirements.txt (or `pip install openai>=1.30.0`) to use --llm-mode real."
+            ) from exc
+
+        client = OpenAI(api_key=self.api_key, base_url=self._normalize_base_url(), timeout=self.timeout_seconds)
+        preferred_model = self._select_model(response_kind=response_kind)
+        model_candidates = [preferred_model]
+        if preferred_model != self.chat_model:
+            model_candidates.append(self.chat_model)
+
         last_exc: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                resp = client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
-                return resp.choices[0].message.content or "{}"
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                if attempt >= self.max_retries:
-                    break
-                LOGGER.warning("DeepSeek call failed (%s/%s): %s", attempt + 1, self.max_retries + 1, exc)
-                time.sleep(1.5 * (attempt + 1))
+        for model in model_candidates:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    return resp.choices[0].message.content or "{}"
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if attempt >= self.max_retries:
+                        break
+                    LOGGER.warning("DeepSeek call failed (%s/%s, model=%s): %s", attempt + 1, self.max_retries + 1, model, exc)
+                    time.sleep(1.5 * (attempt + 1))
+            if model != preferred_model:
+                LOGGER.warning("Preferred model failed for %s; fallback model succeeded/attempted: %s", response_kind, model)
         raise RuntimeError(f"DeepSeek API call failed after retries: {last_exc}")

@@ -331,7 +331,7 @@ class ProjectRecoveryEnv(gym.Env):
         progress_now = self._progress(s)
         progress_delta = progress_now - progress_prev
 
-        terminated = bool(np.mean(s[9:12]) >= 0.92 and progress_now >= 0.90)
+        terminated = bool(np.mean(s[9:12]) >= 0.90 and progress_now >= 0.88)
         truncated = self.step_count >= self.max_steps
 
         info = self._build_info(progress_delta=progress_delta, invalid_action=invalid_action, invalid_reason=invalid_reason, mes_used=mes_used)
