@@ -87,7 +87,12 @@ def _call_revise(fn: Callable[..., Any], state: np.ndarray, info: dict[str, Any]
     try:
         arr = np.asarray(fn(state, info), dtype=np.float32)
     except TypeError:
-        arr = np.asarray(fn(state), dtype=np.float32)
+        try:
+            arr = np.asarray(fn(state), dtype=np.float32)
+        except Exception:  # noqa: BLE001
+            arr = np.asarray(state, dtype=np.float32)
+    except Exception:  # noqa: BLE001
+        arr = np.asarray(state, dtype=np.float32)
     return np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
 
 
@@ -106,10 +111,47 @@ def _effective_state(revised_state: np.ndarray, max_revised_dim: int | None) -> 
     return revised_state if max_revised_dim is None else revised_state[:max_revised_dim]
 
 
-def _weighted_mode_score(metrics: dict[str, Any], task_mode: str, weights_cfg: dict[str, Any]) -> float:
-    weights = dict(weights_cfg.get(task_mode, {}))
+def _valid_action_mask(action_dim: int, info: dict[str, Any]) -> np.ndarray:
+    mask = np.ones(action_dim, dtype=bool)
+    stage = str(info.get("stage", "middle"))
+    mes_soc = float(info.get("mes_soc", 1.0))
+    material = float(info.get("material_stock", 1.0))
+    switching = float(info.get("switching_capability", 1.0))
+    backbone_comm = float(info.get("backbone_comm_ratio", 1.0))
+
+    if mes_soc < 0.12:
+        mask[9:12] = False
+    if material < 0.10:
+        mask[0:9] = False
+        mask[12] = False
+    if switching < 0.25 or backbone_comm < 0.25:
+        mask[12] = False
+    if (mes_soc < 0.20 or material < 0.20 or backbone_comm < 0.30) and stage in {"middle", "late"}:
+        mask[13] = False
+    if stage == "late":
+        mask[0:3] = False
+        weak_layer = str(info.get("weakest_layer", "0"))
+        if weak_layer == "0":
+            mask[6:9] = False
+        elif weak_layer == "1":
+            mask[3:6] = False
+    if not mask.any():
+        mask[:] = False
+        mask[13] = True
+    return mask
+
+
+def _selection_score(metrics: dict[str, Any], weights_cfg: dict[str, Any]) -> float:
+    weights = dict(weights_cfg.get("__global__", {}))
     if not weights:
-        return float(metrics.get("success_rate", 0.0))
+        weights = {
+            "eval_success_rate": 0.40,
+            "critical_load_recovery_ratio": 0.25,
+            "min_recovery_ratio": 0.20,
+            "constraint_violation_rate_eval": -0.35,
+            "mean_progress_delta_eval": 0.08,
+            "late_stage_targeted_action_rate": 0.08,
+        }
     return float(sum(float(w) * float(metrics.get(k, 0.0)) for k, w in weights.items()))
 
 
@@ -129,6 +171,8 @@ def run_training(
     dqn_cfg: dict[str, Any] | None = None,
     severity: str = "moderate",
 ) -> dict[str, Any]:
+    if str(llm_mode).lower() != "real":
+        raise RuntimeError(f"Formal run requires llm_mode=real, got: {llm_mode}")
     if env_name not in {"project_recovery", "mock_recovery"}:
         raise ValueError("Supported env names: project_recovery or mock_recovery")
 
@@ -181,22 +225,70 @@ def run_training(
     for ep in range(train_episodes):
         s, info = env.reset(seed=seed + ep)
         ep_reward = 0.0
+        ep_violation_count = 0
 
         for step in range(max_steps_per_episode):
             rs = _effective_state(_call_revise(revise_state_fn, s, info), max_revised_dim)
+            valid_mask = _valid_action_mask(action_dim, info)
 
             eps = eps_end + (eps_start - eps_end) * max(0.0, 1.0 - global_step / float(max(1, eps_decay_steps)))
             if random.random() < eps:
-                a = int(np.random.randint(0, action_dim))
+                valid_actions = np.where(valid_mask)[0]
+                a = int(np.random.choice(valid_actions))
             else:
                 with torch.no_grad():
                     qvals = q_net(torch.tensor(rs, dtype=torch.float32).unsqueeze(0))
-                    a = int(torch.argmax(qvals, dim=1).item())
+                    qarr = qvals.squeeze(0).cpu().numpy()
+                    qarr[~valid_mask] = -1e9
+                    a = int(np.argmax(qarr))
 
             action_usage[str(a)] += 1
             ns, ext_r, terminated, truncated, info = env.step(a)
             ir = _call_intrinsic(intrinsic_reward_fn, s, a, ns, info, rs)
-            r = float(ext_r + ir)
+            critical_gain = float(np.mean(ns[9:12] - s[9:12]))
+            progress_bonus = float(info.get("progress_delta", 0.0))
+            prev_layers = [float(np.mean(s[0:3])), float(np.mean(s[3:6])), float(np.mean(s[6:9])), float(np.mean(s[9:12]))]
+            next_layers = [float(np.mean(ns[0:3])), float(np.mean(ns[3:6])), float(np.mean(ns[6:9])), float(np.mean(ns[9:12]))]
+            weak_layer_idx = int(np.argmin(prev_layers))
+            weak_layer_gain = max(0.0, next_layers[weak_layer_idx] - prev_layers[weak_layer_idx])
+            prev_zones = [float(np.mean([s[0], s[3], s[6], s[9]])), float(np.mean([s[1], s[4], s[7], s[10]])), float(np.mean([s[2], s[5], s[8], s[11]]))]
+            next_zones = [float(np.mean([ns[0], ns[3], ns[6], ns[9]])), float(np.mean([ns[1], ns[4], ns[7], ns[10]])), float(np.mean([ns[2], ns[5], ns[8], ns[11]]))]
+            weak_zone_idx = int(np.argmin(prev_zones))
+            weak_zone_gain = max(0.0, next_zones[weak_zone_idx] - prev_zones[weak_zone_idx])
+            prev_global = float(np.mean([prev_layers[0], prev_layers[1], prev_layers[2], prev_layers[3]]))
+            next_global = float(np.mean([next_layers[0], next_layers[1], next_layers[2], next_layers[3]]))
+            milestone_bonus = 0.0
+            for th, bonus in ((0.75, 0.12), (0.85, 0.18), (0.90, 0.28)):
+                if prev_global < th <= next_global:
+                    milestone_bonus += bonus
+            step_ratio = float(step + 1) / float(max_steps_per_episode)
+            late_factor = 1.0 + max(0.0, (step_ratio - 0.60) / 0.40) * 1.4
+            invalid_penalty = (0.20 + 0.35 * late_factor) if bool(info.get("invalid_action", False)) else 0.0
+            constraint_penalty = (0.25 + 0.45 * late_factor) if bool(info.get("constraint_violation", False)) else 0.0
+            completion_bonus = 4.0 if bool(terminated) else 0.0
+            late_stage = str(info.get("stage", "middle")) == "late"
+            coordinated_late_penalty = 0.35 if (late_stage and a == 13) else 0.0
+            feeder_late_penalty = 0.22 if (late_stage and a == 12 and (float(info.get("backbone_comm_ratio", 1.0)) < 0.5)) else 0.0
+            targeted_late_bonus = 0.12 if (late_stage and a in {3, 4, 5, 6, 7, 8}) else 0.0
+            weakest_close_bonus = 0.18 * (weak_layer_gain + weak_zone_gain) if late_stage else 0.0
+            low_violation_finish_bonus = 0.8 if (terminated and ep_violation_count <= 1) else 0.0
+            r = float(
+                ext_r
+                + ir
+                + 0.25 * critical_gain
+                + 0.20 * progress_bonus
+                + 0.20 * weak_layer_gain
+                + 0.18 * weak_zone_gain
+                + milestone_bonus
+                + completion_bonus
+                + targeted_late_bonus
+                + weakest_close_bonus
+                + low_violation_finish_bonus
+                - invalid_penalty
+                - constraint_penalty
+                - coordinated_late_penalty
+                - feeder_late_penalty
+            )
             done = bool(terminated or truncated)
 
             nrs = _effective_state(_call_revise(revise_state_fn, ns, info), max_revised_dim)
@@ -231,6 +323,7 @@ def run_training(
 
             if info.get("constraint_violation", False):
                 violations += 1
+                ep_violation_count += 1
             if done:
                 if terminated:
                     successes += 1
@@ -272,6 +365,11 @@ def run_training(
     eval_action_usage = {str(i): 0 for i in range(action_dim)}
     eval_stage_counts: Counter[str] = Counter()
     eval_invalid_reason_counts: Counter[str] = Counter()
+    eval_weakest_zone_counts: Counter[str] = Counter()
+    eval_weakest_layer_counts: Counter[str] = Counter()
+    late_stage_steps_total = 0
+    late_stage_targeted_steps = 0
+    late_stage_coordinated_steps = 0
     representative_eval_trace: list[dict[str, Any]] = []
     representative_eval_summary: dict[str, Any] = {}
 
@@ -289,9 +387,12 @@ def run_training(
         episode_trace: list[dict[str, Any]] = []
         for step_idx in range(max_steps_per_episode):
             rs = _effective_state(_call_revise(revise_state_fn, s, info), max_revised_dim)
+            valid_mask = _valid_action_mask(action_dim, info)
             with torch.no_grad():
                 qvals = q_net(torch.tensor(rs, dtype=torch.float32).unsqueeze(0))
-                a = int(torch.argmax(qvals, dim=1).item())
+                qarr = qvals.squeeze(0).cpu().numpy()
+                qarr[~valid_mask] = -1e9
+                a = int(np.argmax(qarr))
             eval_action_usage[str(a)] += 1
             ns, ext_r, terminated, truncated, info = env.step(a)
             total += float(ext_r)
@@ -303,6 +404,14 @@ def run_training(
             ep_progress.append(float(info.get("progress_delta", 0.0)))
             ep_stage.append(float(info.get("stage_indicator", 0.0)))
             eval_stage_counts[str(info.get("stage", "unknown"))] += 1
+            eval_weakest_zone_counts[str(info.get("weakest_zone", "A"))] += 1
+            eval_weakest_layer_counts[str(info.get("weakest_layer", "0"))] += 1
+            if str(info.get("stage", "middle")) == "late":
+                late_stage_steps_total += 1
+                if a in {3, 4, 5, 6, 7, 8}:
+                    late_stage_targeted_steps += 1
+                if a == 13:
+                    late_stage_coordinated_steps += 1
             if a in {9, 10, 11}:
                 ep_mes_moves += 1
             if ep == 0 and step_idx < 12:
@@ -373,14 +482,25 @@ def run_training(
         action_category_usage[_action_category(int(a_str))] += float(frac)
     dominant_action_category = max(action_category_usage.items(), key=lambda kv: kv[1])[0]
 
+    eval_success_rate = eval_terminated_count / float(max(1, eval_episodes))
+    min_recovery_ratio = min(
+        float(np.mean(power_scores)) if power_scores else 0.0,
+        float(np.mean(comm_scores)) if comm_scores else 0.0,
+        float(np.mean(road_scores)) if road_scores else 0.0,
+        float(np.mean(crit_scores)) if crit_scores else 0.0,
+    )
+
     result = {
         "episode_rewards": episode_rewards,
         "eval_rewards": eval_rewards,
-        "success_rate": successes / float(max(1, train_episodes)),
+        "train_success_rate": successes / float(max(1, train_episodes)),
+        "eval_success_rate": eval_success_rate,
+        "success_rate": eval_success_rate,
         "communication_recovery_ratio": float(np.mean(comm_scores)) if comm_scores else 0.0,
         "power_recovery_ratio": float(np.mean(power_scores)) if power_scores else 0.0,
         "road_recovery_ratio": float(np.mean(road_scores)) if road_scores else 0.0,
         "critical_load_recovery_ratio": float(np.mean(crit_scores)) if crit_scores else 0.0,
+        "min_recovery_ratio": min_recovery_ratio,
         "critical_load_shortfall": float(max(0.0, 1.0 - (float(np.mean(crit_scores)) if crit_scores else 0.0))),
         "recovery_completion_time": float(np.mean(completion_steps)) if completion_steps else float(max_steps_per_episode),
         "cumulative_reward_mean": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
@@ -391,6 +511,7 @@ def run_training(
         "invalid_action_rate": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
         "invalid_action_rate_eval": float(np.mean(eval_invalid_rates)) if eval_invalid_rates else 0.0,
         "mean_progress_delta_eval": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
+        "mean_progress_delta": float(np.mean(eval_progress_deltas)) if eval_progress_deltas else 0.0,
         "mean_stage_indicator_eval": float(np.mean(eval_stage_indicators)) if eval_stage_indicators else 0.0,
         "backbone_comm_ratio": float(np.mean(eval_backbone_comm)) if eval_backbone_comm else 0.0,
         "backbone_power_ratio": float(np.mean(eval_backbone_power)) if eval_backbone_power else 0.0,
@@ -422,7 +543,7 @@ def run_training(
         "zone_B_critical_load_ratio": float(np.mean(eval_zone_B_load)) if eval_zone_B_load else 0.0,
         "zone_C_critical_load_ratio": float(np.mean(eval_zone_C_load)) if eval_zone_C_load else 0.0,
         "task_mode_used": task_mode,
-        "llm_mode_used": llm_mode,
+        "llm_mode_used": "real",
         "revise_module_path": str(revise_module_path),
         "policy_feature_dim_used": state_dim,
         "env_name": env_name,
@@ -430,7 +551,15 @@ def run_training(
         "action_usage": action_usage_norm,
         "action_category_usage": action_category_usage,
         "dominant_action_category": dominant_action_category,
+        "late_stage_targeted_action_rate": float(late_stage_targeted_steps) / float(max(1, late_stage_steps_total)),
+        "late_stage_coordinated_action_rate": float(late_stage_coordinated_steps) / float(max(1, late_stage_steps_total)),
+        "weakest_zone": max(eval_weakest_zone_counts.items(), key=lambda kv: kv[1])[0] if eval_weakest_zone_counts else "A",
+        "weakest_layer": max(eval_weakest_layer_counts.items(), key=lambda kv: kv[1])[0] if eval_weakest_layer_counts else "0",
+        "weakest_zone_frequency": dict(eval_weakest_zone_counts),
         "stage_distribution_eval": {
+            k: v / float(max(1, sum(eval_stage_counts.values()))) for k, v in eval_stage_counts.items()
+        },
+        "stage_distribution": {
             k: v / float(max(1, sum(eval_stage_counts.values()))) for k, v in eval_stage_counts.items()
         },
         "invalid_reason_counts_eval": dict(eval_invalid_reason_counts),
@@ -450,8 +579,8 @@ def run_training(
     }
 
     weights_cfg = task_mode_metric_weights or {}
-    result["selection_score"] = _weighted_mode_score(result, task_mode=task_mode, weights_cfg=weights_cfg)
-    result["selection_metric_used"] = f"weighted_score::{task_mode}"
+    result["selection_score"] = _selection_score(result, weights_cfg=weights_cfg)
+    result["selection_metric_used"] = "global_objective_score"
 
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
     output_json_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -465,10 +594,12 @@ def main() -> None:
     parser.add_argument("--env", default="project_recovery")
     parser.add_argument("--revise-module", default="")
     parser.add_argument("--task-mode", default="coordinated_restoration")
-    parser.add_argument("--llm-mode", default="auto")
+    parser.add_argument("--llm-mode", default="real")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--output", default="outputs/rl_result.json")
     args = parser.parse_args()
+    if str(args.llm_mode).lower() != "real":
+        raise RuntimeError(f"Formal run requires llm_mode=real, got: {args.llm_mode}")
 
     cfg = load_yaml(Path(args.config))
     tr = cfg["training"]

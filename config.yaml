@@ -1,4 +1,7 @@
 llm:
+  base_url: https://api.deepseek.com
+  model_chat: deepseek-chat
+  model_reasoner: deepseek-reasoner
   timeout_seconds: 45
   max_retries: 2
   temperature: 0.3
@@ -13,7 +16,7 @@ scenario:
 
 env:
   name: project_recovery
-  max_steps: 60
+  max_steps: 90
   topology:
     zones: [A, B, C]
     backbone_nodes: [P0, C0, R0]
@@ -34,8 +37,8 @@ env:
     13: coordinated_balanced
 
 training:
-  train_episodes: 40
-  eval_episodes: 8
+  train_episodes: 280
+  eval_episodes: 24
   gamma: 0.98
   batch_size: 64
   replay_size: 30000
@@ -46,36 +49,18 @@ training:
   hidden_dim: 128
   epsilon_start: 1.0
   epsilon_end: 0.05
-  epsilon_decay_steps: 5000
+  epsilon_decay_steps: 12000
 
 selection:
   higher_is_better: true
   task_mode_metric_weights:
-    road_opening_priority:
-      road_recovery_ratio: 0.45
-      success_rate: 0.2
-      constraint_violation_rate_eval: -0.15
-      cumulative_reward_mean: 0.2
-    critical_power_priority:
-      power_recovery_ratio: 0.5
-      critical_load_recovery_ratio: 0.3
-      success_rate: 0.2
-    backbone_comm_priority:
-      communication_recovery_ratio: 0.5
-      backbone_comm_ratio: 0.25
-      success_rate: 0.2
-      constraint_violation_rate_eval: -0.1
-    coordinated_restoration:
-      success_rate: 0.35
-      communication_recovery_ratio: 0.2
-      power_recovery_ratio: 0.2
-      road_recovery_ratio: 0.15
-      critical_load_recovery_ratio: 0.1
-    stabilization_priority:
-      success_rate: 0.25
-      constraint_violation_rate_eval: -0.45
-      cumulative_reward_mean: 0.2
-      critical_load_recovery_ratio: 0.1
+    __global__:
+      eval_success_rate: 0.40
+      critical_load_recovery_ratio: 0.25
+      min_recovery_ratio: 0.20
+      constraint_violation_rate_eval: -0.35
+      mean_progress_delta_eval: 0.08
+      late_stage_targeted_action_rate: 0.08
 
 reward_weights:
   delta_power: 0.20
@@ -99,3 +84,5 @@ task_modes:
 paths:
   generated_dir: generated
   outputs_dir: outputs
+  formal_baseline_result: outputs/exp1_baseline_realcheck_v4.json
+  formal_outer_loop_dir: outputs/real_outer_loop_v4
