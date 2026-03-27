@@ -7,10 +7,9 @@ Main entrypoint: `run_outer_loop.py`
 
 Current two-stage LLM loop:
 
-`route -> planning (reasoner) -> codegen (chat) -> validate -> train -> select -> feedback`
+`route -> planning (reasoner) -> codegen (reasoner) -> validate -> train -> select -> feedback`
 
-- Router/planning/feedback use reasoner routing.
-- Code generation uses chat routing.
+- Router/planning/feedback/codegen use reasoner routing in formal runs.
 - Formal experiment path is **real-only** (`--llm-mode real`, `--router-mode llm`).
 - Mock responses are test-only and are not allowed for formal outputs.
 - Candidate module interface:

@@ -41,6 +41,8 @@ class LLMClient:
         self.call_count = 0
         self.call_history: list[dict[str, Any]] = []
         self.last_error: str = ""
+        self.preflight_chat_ok = False
+        self.preflight_reasoner_ok = False
 
         self._validate_formal_configuration()
 
@@ -132,21 +134,36 @@ class LLMClient:
         return base if base.endswith("/v1") else f"{base}/v1"
 
     def _select_model(self, response_kind: str) -> str:
-        if response_kind in {"router", "planning", "feedback"}:
+        if response_kind in {"router", "planning", "feedback", "codegen"}:
             return self.reasoner_model or self.chat_model
         return self.chat_model
 
-    def preflight_check(self) -> None:
+    def preflight_chat_model(self) -> None:
         preflight_messages = [
             {"role": "system", "content": "You are a strict JSON assistant."},
-            {"role": "user", "content": 'Return exactly this JSON and nothing else: {"ok": true}'},
+            {"role": "user", "content": 'Return exactly this JSON and nothing else: {"ok": true, "kind": "chat"}'},
         ]
+        obj = self.chat_json(preflight_messages, response_kind="chat")
+        if obj.get("ok") is not True or obj.get("kind") != "chat":
+            raise RuntimeError(f"LLM preflight check failed for chat model: {obj}")
+        self.preflight_chat_ok = True
+
+    def preflight_reasoner_model(self) -> None:
+        preflight_messages = [
+            {"role": "system", "content": "You are a strict JSON assistant."},
+            {"role": "user", "content": 'Return exactly this JSON and nothing else: {"ok": true, "kind": "reasoner"}'},
+        ]
+        obj = self.chat_json(preflight_messages, response_kind="planning")
+        if obj.get("ok") is not True or obj.get("kind") != "reasoner":
+            raise RuntimeError(f"LLM preflight check failed for reasoner model: {obj}")
+        self.preflight_reasoner_ok = True
+
+    def preflight_check(self) -> None:
         try:
-            obj = self.chat_json(preflight_messages, response_kind="chat")
+            self.preflight_chat_model()
+            self.preflight_reasoner_model()
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"LLM preflight check failed. {exc}") from exc
-        if obj.get("ok") is not True:
-            raise RuntimeError(f"LLM preflight check failed. Expected {{\"ok\": true}}, got: {obj}")
 
     # test-only helper
     def _mock_response(self, response_kind: str, sample_idx: int) -> str:

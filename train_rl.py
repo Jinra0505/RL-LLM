@@ -116,18 +116,39 @@ def _valid_action_mask(action_dim: int, info: dict[str, Any]) -> np.ndarray:
     stage = str(info.get("stage", "middle"))
     mes_soc = float(info.get("mes_soc", 1.0))
     material = float(info.get("material_stock", 1.0))
-    switching = float(info.get("switching_capability", 1.0))
     backbone_comm = float(info.get("backbone_comm_ratio", 1.0))
+    mean_comm = float(info.get("communication_recovery_ratio", 1.0))
+    road_by_zone = [
+        float(info.get("zone_A_road_ratio", 1.0)),
+        float(info.get("zone_B_road_ratio", 1.0)),
+        float(info.get("zone_C_road_ratio", 1.0)),
+    ]
+    resource_weak = material < 0.10 or mes_soc < 0.08
 
-    if mes_soc < 0.12:
+    # MES dispatch (9/10/11): invalid if mes_soc < 0.08 or target zone road < 0.25.
+    if mes_soc < 0.08:
         mask[9:12] = False
+    else:
+        for zone_idx, road_ratio in enumerate(road_by_zone):
+            if road_ratio < 0.25:
+                mask[9 + zone_idx] = False
+
+    # Material shortage: mask material-intensive actions first.
     if material < 0.10:
-        mask[0:9] = False
+        mask[9:12] = False
         mask[12] = False
-    if switching < 0.25 or backbone_comm < 0.25:
-        mask[12] = False
-    if (mes_soc < 0.20 or material < 0.20 or backbone_comm < 0.30) and stage in {"middle", "late"}:
         mask[13] = False
+
+    # feeder (12): invalid when C0/backbone_comm < 0.30; also invalid under material shortage.
+    if backbone_comm < 0.30 or material < 0.10:
+        mask[12] = False
+
+    # coordinated (13): suppress in low-resource / weak-comm contexts.
+    if material < 0.10 or (backbone_comm < 0.30 and mean_comm < 0.35):
+        mask[13] = False
+    if stage == "late" and (resource_weak or backbone_comm < 0.35):
+        mask[13] = False
+
     if stage == "late":
         mask[0:3] = False
         weak_layer = str(info.get("weakest_layer", "0"))
@@ -137,7 +158,7 @@ def _valid_action_mask(action_dim: int, info: dict[str, Any]) -> np.ndarray:
             mask[3:6] = False
     if not mask.any():
         mask[:] = False
-        mask[13] = True
+        mask[3] = True
     return mask
 
 

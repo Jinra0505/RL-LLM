@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from llm_client import LLMClient
@@ -62,7 +63,93 @@ def _write_failure_artifacts(run_dir: Path, failed_stage: str, error: Exception,
     (run_dir / "llm_call_log.json").write_text(json.dumps(client.call_history, indent=2), encoding="utf-8")
 
 
-def validate_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _semantic_validate_candidate(code: str, max_revised_dim: int | None = None) -> list[str]:
+    errors: list[str] = []
+    sandbox: dict[str, Any] = {}
+    try:
+        exec(compile(code, "<generated-semantic-check>", "exec"), sandbox, sandbox)  # noqa: S102
+    except Exception as exc:  # noqa: BLE001
+        return [f"Semantic load error: {exc}"]
+
+    revise_state = sandbox.get("revise_state")
+    intrinsic_reward = sandbox.get("intrinsic_reward")
+    if not callable(revise_state):
+        errors.append("Semantic validation: revise_state is not callable")
+        return errors
+    if not callable(intrinsic_reward):
+        errors.append("Semantic validation: intrinsic_reward is not callable")
+        return errors
+
+    base_state = np.linspace(0.1, 0.9, 24, dtype=float)
+    synth_inputs = [
+        (base_state.copy(), {"stage": "early", "weakest_zone": "A", "weakest_layer": "2", "constraint_violation": False}),
+        (base_state[::-1].copy(), {"stage": "middle", "weakest_zone": "B", "weakest_layer": "1", "constraint_violation": False}),
+        (np.clip(base_state * 0.5, 0.0, 1.0), {"stage": "late", "weakest_zone": "C", "weakest_layer": "0", "constraint_violation": True}),
+    ]
+    revised_lens: list[int] = []
+    revised_samples: list[np.ndarray] = []
+    for idx, (state, info) in enumerate(synth_inputs):
+        try:
+            rs = revise_state(state, info)
+        except TypeError:
+            rs = revise_state(state)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Semantic validation: revise_state failed on sample {idx}: {exc}")
+            continue
+        arr = np.asarray(rs, dtype=float)
+        if arr.ndim != 1:
+            errors.append(f"Semantic validation: revise_state output must be 1-D, got ndim={arr.ndim} on sample {idx}")
+            continue
+        if not np.isfinite(arr).all():
+            errors.append(f"Semantic validation: revise_state output has NaN/inf on sample {idx}")
+            continue
+        if arr.shape[0] < state.shape[0]:
+            errors.append(
+                f"Semantic validation: revise_state output shorter than raw state on sample {idx} ({arr.shape[0]} < {state.shape[0]})"
+            )
+        if max_revised_dim is not None and arr.shape[0] > int(max_revised_dim):
+            errors.append(
+                f"Semantic validation: revise_state output exceeds max_revised_dim on sample {idx} ({arr.shape[0]} > {max_revised_dim})"
+            )
+        revised_lens.append(int(arr.shape[0]))
+        revised_samples.append(arr)
+
+    if revised_lens and len(set(revised_lens)) != 1:
+        errors.append(f"Semantic validation: revise_state output length is not stable across inputs: {revised_lens}")
+
+    for idx, (state, info) in enumerate(synth_inputs):
+        if idx >= len(revised_samples):
+            break
+        next_state = np.clip(state + 0.01, 0.0, 1.0)
+        try:
+            ir = intrinsic_reward(state, 3, next_state, info, revised_samples[idx])
+        except TypeError:
+            try:
+                ir = intrinsic_reward(state, 3, next_state, info)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Semantic validation: intrinsic_reward failed on sample {idx}: {exc}")
+                continue
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Semantic validation: intrinsic_reward failed on sample {idx}: {exc}")
+            continue
+        if isinstance(ir, (list, tuple, dict, np.ndarray)):
+            errors.append(f"Semantic validation: intrinsic_reward must return scalar float on sample {idx}, got {type(ir)}")
+            continue
+        try:
+            ir_f = float(ir)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Semantic validation: intrinsic_reward not castable to float on sample {idx}: {exc}")
+            continue
+        if not np.isfinite(ir_f):
+            errors.append(f"Semantic validation: intrinsic_reward returned NaN/inf on sample {idx}")
+            continue
+        if abs(ir_f) > 10.0:
+            errors.append(f"Semantic validation: intrinsic_reward magnitude too large on sample {idx}: {ir_f}")
+
+    return errors
+
+
+def validate_candidate_payload(payload: dict[str, Any], max_revised_dim: int | None = None) -> dict[str, Any]:
     errors: list[str] = []
     required = ["file_name", "rationale", "code", "expected_behavior"]
     for key in required:
@@ -106,6 +193,9 @@ def validate_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         errors.append(f"Forbidden call: {node.func.id}")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"Code validation error: {exc}")
+
+    if code.strip() and not errors:
+        errors.extend(_semantic_validate_candidate(code, max_revised_dim=max_revised_dim))
 
     return {"valid": len(errors) == 0, "errors": errors, "normalized_payload": normalized}
 
@@ -308,6 +398,99 @@ def select_best(results: list[dict[str, Any]], metric: str, higher_is_better: bo
     return sorted(results, key=lambda x: x.get(metric, 0.0), reverse=higher_is_better)[0]
 
 
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _reference_metrics(previous_best: dict[str, Any] | None, cfg: dict[str, Any], outputs_root: Path) -> dict[str, Any]:
+    if previous_best and isinstance(previous_best.get("metrics"), dict):
+        return dict(previous_best["metrics"])
+    baseline_path = Path(str(cfg.get("paths", {}).get("formal_baseline_result", outputs_root / "exp1_baseline_realcheck_v4.json")))
+    if baseline_path.exists():
+        try:
+            return json.loads(baseline_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def select_best_candidate(round_candidates: list[dict[str, Any]], reference_metrics: dict[str, Any], higher_is_better: bool) -> dict[str, Any]:
+    accepted: list[dict[str, Any]] = []
+    rejected_ids: list[str] = []
+    rejection_reasons: dict[str, list[str]] = {}
+
+    ref_critical = _safe_float(reference_metrics.get("critical_load_recovery_ratio", 0.0))
+    ref_progress = _safe_float(reference_metrics.get("mean_progress_delta_eval", reference_metrics.get("mean_progress_delta", 0.0)))
+    ref_power = _safe_float(reference_metrics.get("power_recovery_ratio", 0.0))
+    ref_comm = _safe_float(reference_metrics.get("communication_recovery_ratio", 0.0))
+    ref_road = _safe_float(reference_metrics.get("road_recovery_ratio", 0.0))
+    ref_avg_recovery = (ref_power + ref_comm + ref_road) / 3.0
+    ref_violation = _safe_float(reference_metrics.get("constraint_violation_rate_eval", 1.0), default=1.0)
+
+    for cand in round_candidates:
+        cid = str(cand.get("candidate_id", "unknown"))
+        metrics = cand.get("metrics", {})
+        reasons: list[str] = []
+        if not isinstance(metrics, dict) or "selection_score" not in metrics:
+            reasons.append("missing_metrics")
+        else:
+            success = _safe_float(metrics.get("success_rate", 0.0))
+            critical = _safe_float(metrics.get("critical_load_recovery_ratio", 0.0))
+            progress = _safe_float(metrics.get("mean_progress_delta_eval", metrics.get("mean_progress_delta", 0.0)))
+            power = _safe_float(metrics.get("power_recovery_ratio", 0.0))
+            comm = _safe_float(metrics.get("communication_recovery_ratio", 0.0))
+            road = _safe_float(metrics.get("road_recovery_ratio", 0.0))
+            violation = _safe_float(metrics.get("constraint_violation_rate_eval", 1.0), default=1.0)
+            rep = metrics.get("representative_eval_summary", {}) if isinstance(metrics.get("representative_eval_summary"), dict) else {}
+            final_progress_delta = _safe_float(rep.get("final_progress_delta", 0.0))
+            final_stage = str(rep.get("final_stage", "unknown"))
+
+            if success <= 0.0:
+                if ref_critical > 0.0 and critical < (ref_critical - 0.08):
+                    reasons.append("critical_recovery_too_low_vs_reference")
+                if ref_progress > 0.0 and progress < (0.6 * ref_progress):
+                    reasons.append("progress_delta_too_low_vs_reference")
+                low_recovery_layers = sum(
+                    [
+                        power < (ref_power - 0.10) if ref_power > 0 else False,
+                        comm < (ref_comm - 0.10) if ref_comm > 0 else False,
+                        road < (ref_road - 0.10) if ref_road > 0 else False,
+                    ]
+                )
+                if low_recovery_layers >= 2:
+                    reasons.append("multi_layer_recovery_regression")
+                if final_progress_delta == 0.0 and final_stage != "late":
+                    reasons.append("no_final_progress_and_not_late_stage")
+                avg_recovery = (power + comm + road) / 3.0
+                if violation < ref_violation and avg_recovery < (ref_avg_recovery - 0.08):
+                    reasons.append("violation_improved_but_recovery_collapsed")
+
+        if reasons:
+            rejected_ids.append(cid)
+            rejection_reasons[cid] = reasons
+        else:
+            accepted.append(cand)
+
+    pool = accepted if accepted else [c for c in round_candidates if isinstance(c.get("metrics"), dict)]
+    if not pool:
+        raise RuntimeError("No candidate with metrics is available for selection.")
+    best_metrics = select_best([c["metrics"] for c in pool], "selection_score", higher_is_better)
+    best_candidate = next(c for c in pool if c["metrics"] is best_metrics)
+    return {
+        "best_candidate": best_candidate,
+        "selection_diagnostics": {
+            "selection_policy": "gate_then_score",
+            "accepted_ids": [str(c.get("candidate_id", "")) for c in accepted],
+            "rejected_ids": rejected_ids,
+            "rejection_reasons": rejection_reasons,
+            "used_fallback_pool": len(accepted) == 0,
+        },
+    }
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="LLM outer loop for project-grade tri-layer recovery env.")
@@ -376,6 +559,8 @@ def main() -> None:
                 "reasoner_model": client.reasoner_model,
                 "api_key_present": bool(client.api_key),
                 "preflight_ok": True,
+                "preflight_chat_ok": client.preflight_chat_ok,
+                "preflight_reasoner_ok": client.preflight_reasoner_ok,
             },
             indent=2,
         ),
@@ -464,7 +649,14 @@ def main() -> None:
                     err = RuntimeError("Codegen stage JSON parse failed under real LLM run.")
                     _write_failure_artifacts(run_dir, "codegen", err, client)
                     raise err
-                report = validate_candidate_payload(parsed)
+                report = validate_candidate_payload(
+                    parsed,
+                    max_revised_dim=(
+                        int(cfg.get("state_representation", {}).get("max_revised_dim"))
+                        if cfg.get("state_representation", {}).get("max_revised_dim") is not None
+                        else None
+                    ),
+                )
                 report["repaired_from_raw"] = repaired
                 if report["valid"]:
                     break
@@ -511,8 +703,13 @@ def main() -> None:
             (cdir / "candidate_record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
             round_candidates.append(record)
 
-        best_metrics = select_best([c["metrics"] for c in round_candidates], "selection_score", higher_is_better)
-        best_candidate = next(c for c in round_candidates if c["metrics"] is best_metrics)
+        selection_result = select_best_candidate(
+            round_candidates=round_candidates,
+            reference_metrics=_reference_metrics(previous_best, cfg, outputs_root),
+            higher_is_better=higher_is_better,
+        )
+        best_candidate = selection_result["best_candidate"]
+        selection_diagnostics = selection_result["selection_diagnostics"]
 
         feedback_payload = build_feedback(best_candidate, "selection_score")
         try:
@@ -542,6 +739,11 @@ def main() -> None:
             "router_source": "llm",
             "planning_source": "llm",
             "feedback_source": "llm",
+            "llm_task_mode_raw": route.get("llm_task_mode_raw", route.get("task_mode")),
+            "final_task_mode": route.get("final_task_mode", route.get("task_mode")),
+            "override_applied": bool(route.get("override_applied", False)),
+            "override_reason": str(route.get("override_reason", "")),
+            "selection_diagnostics": selection_diagnostics,
             "llm_feedback": feedback_json,
         }
         (round_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -557,10 +759,20 @@ def main() -> None:
         "chat_model": client.chat_model,
         "reasoner_model": client.reasoner_model,
         "api_key_present": bool(client.api_key),
+        "preflight_chat_ok": client.preflight_chat_ok,
+        "preflight_reasoner_ok": client.preflight_reasoner_ok,
+        "router_model": client.reasoner_model,
+        "planning_model": client.reasoner_model,
+        "codegen_model": client.reasoner_model,
+        "feedback_model": client.reasoner_model,
         "real_llm_call_count": client.call_count,
     }
     (run_dir / "llm_call_log.json").write_text(json.dumps(client.call_history, indent=2), encoding="utf-8")
-    (run_dir / "outer_loop_final_summary.json").write_text(json.dumps({"rounds": history, "llm_audit": llm_audit}, indent=2), encoding="utf-8")
+    final_selection_diag = history[-1].get("selection_diagnostics", {}) if history else {}
+    (run_dir / "outer_loop_final_summary.json").write_text(
+        json.dumps({"rounds": history, "selection_diagnostics": final_selection_diag, "llm_audit": llm_audit}, indent=2),
+        encoding="utf-8",
+    )
     LOGGER.info("Outer loop complete. Final summary: %s", run_dir / "outer_loop_final_summary.json")
 
 
