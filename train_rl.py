@@ -171,6 +171,8 @@ def run_training(
     dqn_cfg: dict[str, Any] | None = None,
     severity: str = "moderate",
 ) -> dict[str, Any]:
+    if str(llm_mode).lower() != "real":
+        raise RuntimeError(f"Formal run requires llm_mode=real, got: {llm_mode}")
     if env_name not in {"project_recovery", "mock_recovery"}:
         raise ValueError("Supported env names: project_recovery or mock_recovery")
 
@@ -541,7 +543,7 @@ def run_training(
         "zone_B_critical_load_ratio": float(np.mean(eval_zone_B_load)) if eval_zone_B_load else 0.0,
         "zone_C_critical_load_ratio": float(np.mean(eval_zone_C_load)) if eval_zone_C_load else 0.0,
         "task_mode_used": task_mode,
-        "llm_mode_used": llm_mode,
+        "llm_mode_used": "real",
         "revise_module_path": str(revise_module_path),
         "policy_feature_dim_used": state_dim,
         "env_name": env_name,
@@ -592,10 +594,12 @@ def main() -> None:
     parser.add_argument("--env", default="project_recovery")
     parser.add_argument("--revise-module", default="")
     parser.add_argument("--task-mode", default="coordinated_restoration")
-    parser.add_argument("--llm-mode", default="auto")
+    parser.add_argument("--llm-mode", default="real")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--output", default="outputs/rl_result.json")
     args = parser.parse_args()
+    if str(args.llm_mode).lower() != "real":
+        raise RuntimeError(f"Formal run requires llm_mode=real, got: {args.llm_mode}")
 
     cfg = load_yaml(Path(args.config))
     tr = cfg["training"]

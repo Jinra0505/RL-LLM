@@ -15,7 +15,7 @@ import yaml
 from llm_client import LLMClient
 from mock_recovery_env import ProjectRecoveryEnv
 from prompts import CODEGEN_PROMPT, FEEDBACK_PROMPT, PLANNING_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
-from router import route_llm, route_rule, summarize_trajectory
+from router import route_llm, summarize_trajectory
 from train_rl import run_training
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +48,18 @@ def parse_json_with_repair(raw: str) -> tuple[dict[str, Any], bool]:
         if s != -1 and e != -1 and e > s:
             return json.loads(raw[s : e + 1]), True
     return {}, True
+
+
+def _write_failure_artifacts(run_dir: Path, failed_stage: str, error: Exception, client: LLMClient) -> None:
+    payload = {
+        "failed_stage": failed_stage,
+        "last_error": str(error),
+        "llm_requested_mode": client.mode,
+        "llm_effective_mode": client.effective_mode(),
+        "real_llm_call_count": client.call_count,
+    }
+    (run_dir / "run_failure.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (run_dir / "llm_call_log.json").write_text(json.dumps(client.call_history, indent=2), encoding="utf-8")
 
 
 def validate_candidate_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -300,13 +312,20 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="LLM outer loop for project-grade tri-layer recovery env.")
     parser.add_argument("--env", default="project_recovery")
-    parser.add_argument("--llm-mode", choices=["auto", "mock", "real"], default="auto")
-    parser.add_argument("--router-mode", choices=["off", "rule", "llm"], default="rule")
+    parser.add_argument("--llm-mode", choices=["real"], default="real")
+    parser.add_argument("--router-mode", choices=["llm"], default="llm")
     parser.add_argument("--fixed-task-mode", default="")
     parser.add_argument("--reroute-each-round", action="store_true")
     parser.add_argument("--rounds-override", type=int, default=0)
     parser.add_argument("--config", default="config.yaml")
     args = parser.parse_args()
+
+    if args.llm_mode != "real":
+        raise RuntimeError("Formal run requires llm_mode=real.")
+    if args.router_mode != "llm":
+        raise RuntimeError("Formal run requires router_mode=llm.")
+    if args.fixed_task_mode:
+        raise RuntimeError("Formal run does not allow fixed-task-mode override.")
 
     cfg = load_yaml(Path(args.config))
     rounds = args.rounds_override or int(cfg["outer_loop"]["rounds"])
@@ -337,14 +356,34 @@ def main() -> None:
     run_id = datetime.now(timezone.utc).strftime("run_%Y%m%d_%H%M%S")
     run_dir = outputs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        client.preflight_check()
+    except Exception as exc:  # noqa: BLE001
+        _write_failure_artifacts(run_dir, "preflight", exc, client)
+        raise
+
     (run_dir / "run_snapshot.json").write_text(
-        json.dumps({"args": vars(args), "config": cfg, "llm_effective_mode": "mock" if client.using_mock else "real"}, indent=2),
+        json.dumps(
+            {
+                "args": vars(args),
+                "config": cfg,
+                "llm_requested_mode": args.llm_mode,
+                "llm_effective_mode": client.effective_mode(),
+                "router_mode": args.router_mode,
+                "api_provider": client.api_provider,
+                "base_url": client.base_url,
+                "chat_model": client.chat_model,
+                "reasoner_model": client.reasoner_model,
+                "api_key_present": bool(client.api_key),
+                "preflight_ok": True,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
-    default_mode = str(cfg.get("task_modes", {}).get("default", "coordinated_restoration"))
     history: list[dict[str, Any]] = []
-    route = {"task_mode": args.fixed_task_mode or default_mode, "confidence": 0.8, "reason": "default", "stage": "middle"}
+    route: dict[str, Any] = {}
 
     for round_idx in range(rounds):
         previous_best = history[-1].get("best_candidate", {}) if history else None
@@ -352,32 +391,36 @@ def main() -> None:
         routing_context = collect_routing_context(args.env, prev_metrics, cfg, previous_best_candidate=previous_best)
 
         if round_idx == 0 or args.reroute_each_round:
-            if args.fixed_task_mode:
-                route = {"task_mode": args.fixed_task_mode, "confidence": 1.0, "reason": "fixed", "stage": "middle"}
-            elif args.router_mode == "off":
-                route = {"task_mode": default_mode, "confidence": 0.8, "reason": "router off", "stage": "middle"}
-            elif args.router_mode == "rule":
-                route = route_rule(routing_context)
-            else:
+            try:
                 route = route_llm(client, SYSTEM_PROMPT, ROUTER_PROMPT, routing_context)
+            except Exception as exc:  # noqa: BLE001
+                _write_failure_artifacts(run_dir, "router", exc, client)
+                raise
 
         round_dir = run_dir / f"round_{round_idx+1}"
         round_dir.mkdir(parents=True, exist_ok=True)
+        route["source"] = "llm"
         (round_dir / "route.json").write_text(json.dumps(route, indent=2), encoding="utf-8")
         planning_payload = build_planning_payload(
             route=route,
             routing_context=routing_context,
             previous_feedback=(history[-1].get("llm_feedback", {}) if history else None),
         )
-        planning_raw = client.chat(
-            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": PLANNING_PROMPT + "\n\n" + json.dumps(planning_payload, indent=2)}],
-            response_kind="planning",
-            sample_idx=round_idx,
-        )
-        planning_json, planning_repaired = parse_json_with_repair(planning_raw)
+        try:
+            planning_raw = client.chat(
+                [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": PLANNING_PROMPT + "\n\n" + json.dumps(planning_payload, indent=2)}],
+                response_kind="planning",
+                sample_idx=round_idx,
+            )
+            planning_json, planning_repaired = parse_json_with_repair(planning_raw)
+            if not planning_json:
+                raise RuntimeError("Planning stage JSON parse failed under real LLM run.")
+        except Exception as exc:  # noqa: BLE001
+            _write_failure_artifacts(run_dir, "planning", exc, client)
+            raise
         (round_dir / "planning_raw.txt").write_text(planning_raw, encoding="utf-8")
         (round_dir / "planning.json").write_text(
-            json.dumps({"payload": planning_payload, "planning": planning_json, "repaired_from_raw": planning_repaired}, indent=2),
+            json.dumps({"source": "llm", "payload": planning_payload, "planning": planning_json, "repaired_from_raw": planning_repaired}, indent=2),
             encoding="utf-8",
         )
 
@@ -407,12 +450,20 @@ def main() -> None:
                         "\n\nPrevious output was invalid. Respond with ONLY one JSON object with keys: "
                         "file_name, rationale, code, expected_behavior."
                     )
-                raw = client.chat(
-                    [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": attempt_prompt}],
-                    response_kind="codegen",
-                    sample_idx=sample_idx + round_idx * 10 + attempt,
-                )
+                try:
+                    raw = client.chat(
+                        [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": attempt_prompt}],
+                        response_kind="codegen",
+                        sample_idx=sample_idx + round_idx * 10 + attempt,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _write_failure_artifacts(run_dir, "codegen", exc, client)
+                    raise
                 parsed, repaired = parse_json_with_repair(raw)
+                if not parsed and attempt == 1:
+                    err = RuntimeError("Codegen stage JSON parse failed under real LLM run.")
+                    _write_failure_artifacts(run_dir, "codegen", err, client)
+                    raise err
                 report = validate_candidate_payload(parsed)
                 report["repaired_from_raw"] = repaired
                 if report["valid"]:
@@ -438,7 +489,7 @@ def main() -> None:
                     max_steps_per_episode=int(cfg["env"]["max_steps"]),
                     gamma=float(cfg["training"]["gamma"]),
                     task_mode=route["task_mode"],
-                    llm_mode="mock" if client.using_mock else "real",
+                    llm_mode="real",
                     output_json_path=cdir / "training_result.json",
                     seed=42 + round_idx * 10 + sample_idx,
                     max_revised_dim=(int(cfg.get("state_representation", {}).get("max_revised_dim")) if cfg.get("state_representation", {}).get("max_revised_dim") is not None else None),
@@ -449,7 +500,7 @@ def main() -> None:
                 record["metrics"] = metrics
                 record["candidate_path"] = str(candidate_path)
                 record["task_mode"] = route["task_mode"]
-                record["route_source"] = str(routing_context.get("trajectory_summary", {}).get("source", "unknown"))
+                record["route_source"] = "llm"
                 record["selection_score"] = float(metrics.get("selection_score", 0.0))
                 record["representative_eval_summary"] = dict(metrics.get("representative_eval_summary", {}))
                 (cdir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
@@ -464,8 +515,18 @@ def main() -> None:
         best_candidate = next(c for c in round_candidates if c["metrics"] is best_metrics)
 
         feedback_payload = build_feedback(best_candidate, "selection_score")
-        feedback_raw = client.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": FEEDBACK_PROMPT + "\n\n" + json.dumps(feedback_payload, indent=2)}], response_kind="feedback")
-        feedback_json, _ = parse_json_with_repair(feedback_raw)
+        try:
+            feedback_raw = client.chat(
+                [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": FEEDBACK_PROMPT + "\n\n" + json.dumps(feedback_payload, indent=2)}],
+                response_kind="feedback",
+            )
+            feedback_json, _ = parse_json_with_repair(feedback_raw)
+            if not feedback_json:
+                raise RuntimeError("Feedback stage JSON parse failed under real LLM run.")
+        except Exception as exc:  # noqa: BLE001
+            _write_failure_artifacts(run_dir, "feedback", exc, client)
+            raise
+        (round_dir / "feedback.json").write_text(json.dumps({"source": "llm", "feedback": feedback_json}, indent=2), encoding="utf-8")
 
         summary = {
             "round": round_idx + 1,
@@ -478,12 +539,28 @@ def main() -> None:
             "best_candidate_path": str(best_candidate.get("candidate_path", "")),
             "best_candidate": best_candidate,
             "feedback_payload": feedback_payload,
+            "router_source": "llm",
+            "planning_source": "llm",
+            "feedback_source": "llm",
             "llm_feedback": feedback_json,
         }
         (round_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         history.append(summary)
 
-    (run_dir / "outer_loop_final_summary.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+    llm_audit = {
+        "requested_mode": args.llm_mode,
+        "effective_mode": client.effective_mode(),
+        "router_mode": args.router_mode,
+        "preflight_ok": True,
+        "api_provider": client.api_provider,
+        "base_url": client.base_url,
+        "chat_model": client.chat_model,
+        "reasoner_model": client.reasoner_model,
+        "api_key_present": bool(client.api_key),
+        "real_llm_call_count": client.call_count,
+    }
+    (run_dir / "llm_call_log.json").write_text(json.dumps(client.call_history, indent=2), encoding="utf-8")
+    (run_dir / "outer_loop_final_summary.json").write_text(json.dumps({"rounds": history, "llm_audit": llm_audit}, indent=2), encoding="utf-8")
     LOGGER.info("Outer loop complete. Final summary: %s", run_dir / "outer_loop_final_summary.json")
 
 

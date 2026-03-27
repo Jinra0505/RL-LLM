@@ -11,6 +11,8 @@ Current two-stage LLM loop:
 
 - Router/planning/feedback use reasoner routing.
 - Code generation uses chat routing.
+- Formal experiment path is **real-only** (`--llm-mode real`, `--router-mode llm`).
+- Mock responses are test-only and are not allowed for formal outputs.
 - Candidate module interface:
   - `revise_state(state, info=None)`
   - `intrinsic_reward(state, action, next_state, info=None, revised_state=None)`

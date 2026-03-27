@@ -87,5 +87,7 @@ def route_llm(client: LLMClient, system_prompt: str, router_prompt: str, routing
         route["task_mode"] = "stabilization_priority"
         route["reason"] = "Overridden: violation rate is high; prioritize stabilization."
     if route["task_mode"] not in TASKS:
-        route["task_mode"] = "coordinated_restoration"
+        raise ValueError(f"Router returned invalid task_mode: {route['task_mode']}")
+    route["source"] = "llm"
+    route["model"] = client.reasoner_model
     return route
