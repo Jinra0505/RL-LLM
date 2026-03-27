@@ -1,25 +1,43 @@
-# Experiment Summary
+# Experiment Summary (Official v4)
 
-- Run ID: `run_20260326_064917`
-- Baseline file: `outputs/exp1_baseline.json`
-- Outer-loop final summary: `outputs/run_20260326_064917/outer_loop_final_summary.json`
+## Artifact paths used
+- Baseline v4: `outputs/exp1_baseline_realcheck_v4.json`
+- Real outer-loop v4 final: `outputs/real_outer_loop_v4/outer_loop_final_summary.json`
+- Real round summary: `outputs/real_outer_loop_v4/round_1/summary.json`
+- Candidate metrics:
+  - `outputs/real_outer_loop_v4/round_1/r1_c1/metrics.json`
+  - `outputs/real_outer_loop_v4/round_1/r1_c2/metrics.json`
 
-## Baseline vs Best Candidate (Round 1)
+## v4 key metrics
+### Baseline v4
+- eval_success_rate: **0.5417**
+- power/comm/road recovery: **0.9203 / 0.8688 / 0.9240**
+- critical_load_recovery_ratio: **0.9671**
+- constraint_violation_rate_eval: **0.5489**
+- truncated_rate: **0.4583**
+- dominant_action_category: **coordinated**
 
-| metric | baseline | best_candidate |
-|---|---:|---:|
-| success_rate | 0.0000 | 0.0000 |
-| communication_recovery_ratio | 0.6098 | 0.4466 |
-| power_recovery_ratio | 0.6211 | 0.5775 |
-| road_recovery_ratio | 0.5563 | 0.5306 |
-| critical_load_recovery_ratio | 0.6801 | 0.5910 |
-| backbone_comm_ratio | 0.4523 | 0.3491 |
-| constraint_violation_rate_eval | 0.4812 | 0.3583 |
-| cumulative_reward_mean | -1.8950 | -22.5442 |
-| selection_score | 0.3976 | 0.4660 |
+### Real v4 (best candidate)
+- best candidate: **r1_c1**
+- route task_mode: **critical_power_priority**
+- eval_success_rate: **0.7500**
+- power/comm/road recovery: **0.9439 / 0.9111 / 0.8830**
+- critical_load_recovery_ratio: **0.9494**
+- constraint_violation_rate_eval: **0.5802**
+- truncated_rate: **0.2500**
+- dominant_action_category: **coordinated**
 
-## Best Candidate Metadata
+## Current conclusion
+1. Real-mode RL+LLM framework is established and operational in v4.
+2. Relative to baseline_v4, real_v4 improves completion and some recovery dimensions.
+3. Remaining primary issue is still elevated violation rate and coordinated-heavy late-stage behavior.
 
-- best candidate file_name: `generated_candidate_mock_0.py`
-- best candidate task_mode: `critical_power_priority`
-- best candidate selection_score: `0.4660`
+## Evaluation credibility note (must-read)
+Cross-version (v2/v3/v4) success-rate changes are not purely from strategy improvement.
+They are also influenced by protocol/environment changes:
+1. success-rate statistic correction to `eval_success_rate`,
+2. increased `max_steps`,
+3. relaxed done/termination threshold.
+
+Therefore, cross-version interpretation should not rely on success-rate alone.
+Recovery ratios, violation metrics, and late-stage behavior remain meaningful comparison axes.
