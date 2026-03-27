@@ -76,5 +76,11 @@ def route_llm(client: LLMClient, system_prompt: str, router_prompt: str, routing
         if key not in route:
             raise ValueError(f"Router response missing key: {key}")
     if route["task_mode"] not in TASKS:
-        route["task_mode"] = "coordinated_restoration"
+        raise ValueError(f"Router returned invalid task_mode: {route['task_mode']}")
+    route["source"] = "llm"
+    route["model"] = client.reasoner_model
+    route["llm_task_mode_raw"] = route["task_mode"]
+    route["final_task_mode"] = route["task_mode"]
+    route["override_applied"] = False
+    route["override_reason"] = ""
     return route

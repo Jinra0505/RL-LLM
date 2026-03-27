@@ -1,206 +1,212 @@
 from __future__ import annotations
 
-"""Single-file LLM client with DeepSeek real mode + deterministic mock mode."""
+"""Formal-run LLM client (real-only, no automatic mock fallback)."""
 
 import json
-import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any
-
-LOGGER = logging.getLogger(__name__)
 
 
 class LLMClient:
+    """DeepSeek-compatible OpenAI client for formal runs.
+
+    Notes:
+    - Formal path is strictly real-only.
+    - `_mock_response` is kept as test-only helper and is unreachable from formal CLI flows.
+    """
+
     def __init__(
         self,
-        mode: str = "auto",
+        mode: str = "real",
         timeout_seconds: int = 45,
         max_retries: int = 2,
         temperature: float = 0.3,
         max_tokens: int = 1400,
     ) -> None:
-        self.mode = mode
+        self.mode = str(mode).strip().lower()
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+        self.api_provider = "deepseek-compatible-openai"
+        self.api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+        legacy_model = os.getenv("DEEPSEEK_MODEL", "").strip()
+        self.chat_model = os.getenv("DEEPSEEK_MODEL_CHAT", legacy_model).strip()
+        self.reasoner_model = os.getenv("DEEPSEEK_MODEL_REASONER", self.chat_model).strip()
 
-        if self.mode == "real" and not self.api_key:
-            raise RuntimeError("--llm-mode real selected but DEEPSEEK_API_KEY is not set.")
-        if self.mode == "auto" and not self.api_key:
-            LOGGER.warning("DEEPSEEK_API_KEY not found, running in mock LLM mode.")
+        self.call_count = 0
+        self.call_history: list[dict[str, Any]] = []
+        self.last_error: str = ""
+        self.preflight_chat_ok = False
+        self.preflight_reasoner_ok = False
+
+        self._validate_formal_configuration()
+
+    def _validate_formal_configuration(self) -> None:
+        if self.mode != "real":
+            raise RuntimeError(f"Formal run requires llm_mode=real, got: {self.mode}")
+        if not self.api_key:
+            raise RuntimeError("Formal run requires real LLM, but DEEPSEEK_API_KEY is not set.")
+        if not self.base_url:
+            raise RuntimeError("Formal run requires non-empty DEEPSEEK_BASE_URL.")
+        if not self.chat_model:
+            raise RuntimeError("Formal run requires non-empty DEEPSEEK_MODEL_CHAT (or DEEPSEEK_MODEL).")
+        if not self.reasoner_model:
+            raise RuntimeError("Formal run requires non-empty DEEPSEEK_MODEL_REASONER.")
+        try:
+            from openai import OpenAI  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Formal run requires openai dependency: install requirements.txt (or `pip install openai>=1.30.0`)."
+            ) from exc
 
     @property
     def using_mock(self) -> bool:
-        return self.mode == "mock" or (self.mode == "auto" and not self.api_key)
+        # Kept for backward compatibility with existing code paths; formal mode is always real.
+        return False
+
+    def effective_mode(self) -> str:
+        return "real"
+
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _record_call(
+        self,
+        *,
+        response_kind: str,
+        model: str,
+        success: bool,
+        latency_sec: float,
+        error: str = "",
+    ) -> None:
+        self.call_history.append(
+            {
+                "timestamp": self._now(),
+                "response_kind": response_kind,
+                "model": model,
+                "success": bool(success),
+                "latency_sec": float(latency_sec),
+                "error": error,
+            }
+        )
+        self.call_count += 1
+        if error:
+            self.last_error = error
 
     def chat(self, messages: list[dict[str, str]], response_kind: str = "chat", sample_idx: int = 0) -> str:
-        if self.using_mock:
-            return self._mock_response(response_kind=response_kind, sample_idx=sample_idx)
-        return self._real_chat(messages)
+        _ = sample_idx  # test-only placeholder; formal path never uses mock sampling.
+        return self._real_chat(messages, response_kind=response_kind)
 
     def chat_json(self, messages: list[dict[str, str]], response_kind: str = "chat", sample_idx: int = 0) -> dict[str, Any]:
         raw = self.chat(messages, response_kind=response_kind, sample_idx=sample_idx)
+        candidates: list[str] = [raw.strip()]
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            candidates.append("\n".join(lines).strip())
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidates.append(raw[start : end + 1])
+
+        for text in candidates:
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+
+        snippet = raw[:400].replace("\n", "\\n")
+        raise RuntimeError(f"{response_kind} JSON parse failed under real LLM run. Raw snippet: {snippet}")
+
+    def _normalize_base_url(self) -> str:
+        base = self.base_url.rstrip("/")
+        return base if base.endswith("/v1") else f"{base}/v1"
+
+    def _select_model(self, response_kind: str) -> str:
+        if response_kind in {"router", "planning", "feedback", "codegen"}:
+            return self.reasoner_model or self.chat_model
+        return self.chat_model
+
+    def preflight_chat_model(self) -> None:
+        preflight_messages = [
+            {"role": "system", "content": "You are a strict JSON assistant."},
+            {"role": "user", "content": 'Return exactly this JSON and nothing else: {"ok": true, "kind": "chat"}'},
+        ]
+        obj = self.chat_json(preflight_messages, response_kind="chat")
+        if obj.get("ok") is not True or obj.get("kind") != "chat":
+            raise RuntimeError(f"LLM preflight check failed for chat model: {obj}")
+        self.preflight_chat_ok = True
+
+    def preflight_reasoner_model(self) -> None:
+        preflight_messages = [
+            {"role": "system", "content": "You are a strict JSON assistant."},
+            {"role": "user", "content": 'Return exactly this JSON and nothing else: {"ok": true, "kind": "reasoner"}'},
+        ]
+        obj = self.chat_json(preflight_messages, response_kind="planning")
+        if obj.get("ok") is not True or obj.get("kind") != "reasoner":
+            raise RuntimeError(f"LLM preflight check failed for reasoner model: {obj}")
+        self.preflight_reasoner_ok = True
+
+    def preflight_check(self) -> None:
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                return json.loads(raw[start : end + 1])
-            raise ValueError(f"Malformed JSON from LLM ({response_kind}): {raw[:200]}")
+            self.preflight_chat_model()
+            self.preflight_reasoner_model()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"LLM preflight check failed. {exc}") from exc
 
+    # test-only helper
     def _mock_response(self, response_kind: str, sample_idx: int) -> str:
-        if response_kind == "router":
-            task_modes = [
-                "road_opening_priority",
-                "critical_power_priority",
-                "backbone_comm_priority",
-                "coordinated_restoration",
-                "stabilization_priority",
-            ]
-            stages = ["early", "middle", "late"]
-            return json.dumps(
-                {
-                    "task_mode": task_modes[sample_idx % len(task_modes)],
-                    "confidence": 0.74 + 0.02 * (sample_idx % 6),
-                    "reason": "Deterministic mock route for current tri-layer restoration task.",
-                    "stage": stages[sample_idx % len(stages)],
-                }
-            )
-        if response_kind == "feedback":
-            return json.dumps(
-                {
-                    "improvement_focus": "Increase critical-load gain and reduce invalid action penalties.",
-                    "keep_signals": ["progress_delta", "constraint_violation"],
-                    "avoid_patterns": ["over-focusing transport in early recovery"],
-                }
-            )
+        _ = response_kind
+        _ = sample_idx
+        return "{}"
 
-        module_name = f"generated_candidate_mock_{sample_idx}.py"
-        code = '''from __future__ import annotations
-import math
-import numpy as np
-
-def _safe(x):
-    x = np.asarray(x, dtype=float)
-    return np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
-
-def revise_state(state, info=None):
-    s = _safe(state)
-    p = s[0:3]
-    c = s[3:6]
-    r = s[6:9]
-    l = s[9:12]
-    bb = s[12:15]
-    mean_power = float(np.mean(p))
-    mean_comm = float(np.mean(c))
-    mean_road = float(np.mean(r))
-    mean_critical = float(np.mean(l))
-    backbone_mean = float(np.mean(bb))
-    backbone_bottleneck = float(np.min(bb))
-    zone_scores = np.array([
-        (p[0] + c[0] + r[0] + l[0]) / 4.0,
-        (p[1] + c[1] + r[1] + l[1]) / 4.0,
-        (p[2] + c[2] + r[2] + l[2]) / 4.0,
-    ], dtype=float)
-    weakest_zone_score = float(np.min(zone_scores))
-    weakest_zone_idx = float(np.argmin(zone_scores))
-    critical_load_shortfall = float(max(0.0, 1.0 - mean_critical))
-    crew_mean = float(np.mean(s[15:18]))
-    material = float(s[20])
-    switching = float(s[21])
-    mes_soc = float(s[19])
-    resource_pressure = float(1.0 - np.clip((crew_mean + material + switching + mes_soc) / 4.0, 0.0, 1.0))
-    stage_indicator = float(s[22])
-    constraint_flag = float(s[23])
-    extras = np.array([
-        mean_power,
-        mean_comm,
-        mean_road,
-        mean_critical,
-        backbone_mean,
-        backbone_bottleneck,
-        weakest_zone_score,
-        weakest_zone_idx,
-        critical_load_shortfall,
-        resource_pressure,
-        stage_indicator,
-        constraint_flag,
-    ], dtype=float)
-    return np.concatenate([s, extras], axis=0)
-
-def intrinsic_reward(state, action, next_state, info=None, revised_state=None):
-    s = _safe(state)
-    ns = _safe(next_state if next_state is not None else state)
-    dp = float(np.mean(ns[0:3]) - np.mean(s[0:3]))
-    dc = float(np.mean(ns[3:6]) - np.mean(s[3:6]))
-    dr = float(np.mean(ns[6:9]) - np.mean(s[6:9]))
-    dl = float(np.mean(ns[9:12]) - np.mean(s[9:12]))
-    base = 0.32 * dp + 0.24 * dc + 0.2 * dr + 0.4 * dl
-    zone_before = np.array([
-        (s[0] + s[3] + s[6] + s[9]) / 4.0,
-        (s[1] + s[4] + s[7] + s[10]) / 4.0,
-        (s[2] + s[5] + s[8] + s[11]) / 4.0,
-    ], dtype=float)
-    zone_after = np.array([
-        (ns[0] + ns[3] + ns[6] + ns[9]) / 4.0,
-        (ns[1] + ns[4] + ns[7] + ns[10]) / 4.0,
-        (ns[2] + ns[5] + ns[8] + ns[11]) / 4.0,
-    ], dtype=float)
-    weakest_idx = int(np.argmin(zone_before))
-    weakest_bonus = float(zone_after[weakest_idx] - zone_before[weakest_idx])
-    mes_drop = float(max(0.0, s[19] - ns[19]))
-    penalty = 0.0
-    if info and bool(info.get("invalid_action", False)):
-        penalty += 0.2
-    if info and bool(info.get("constraint_violation", False)):
-        penalty += 0.25
-    penalty += 0.08 * max(0.0, mes_drop - 0.05)
-    mode = str((info or {}).get("task_mode", "coordinated_restoration"))
-    if mode == "road_opening_priority":
-        base += 0.15 * dr
-    elif mode == "critical_power_priority":
-        base += 0.18 * (dp + dl)
-    elif mode == "backbone_comm_priority":
-        base += 0.15 * dc
-    elif mode == "stabilization_priority":
-        penalty += 0.05 * abs(dr + dp + dc)
-    total = base + 0.2 * weakest_bonus - penalty
-    return float(math.tanh(2.2 * total))
-'''
-        return json.dumps(
-            {
-                "file_name": module_name,
-                "rationale": "Uses progress+gap shaping and penalizes invalid/violating transitions.",
-                "code": code,
-                "expected_behavior": "Improve balanced recovery and reduce unsafe actions.",
-            }
-        )
-
-    def _real_chat(self, messages: list[dict[str, str]]) -> str:
+    def _real_chat(self, messages: list[dict[str, str]], response_kind: str = "chat") -> str:
         from openai import OpenAI
 
-        client = OpenAI(api_key=self.api_key, base_url=f"{self.base_url.rstrip('/')}/v1", timeout=self.timeout_seconds)
+        client = OpenAI(api_key=self.api_key, base_url=self._normalize_base_url(), timeout=self.timeout_seconds)
+        model = self._select_model(response_kind=response_kind)
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            t0 = time.time()
             try:
                 resp = client.chat.completions.create(
-                    model=self.model,
+                    model=model,
                     messages=messages,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                 )
-                return resp.choices[0].message.content or "{}"
+                content = resp.choices[0].message.content or ""
+                if not content.strip():
+                    raise RuntimeError(f"Empty content from LLM for response_kind={response_kind}, model={model}")
+                self._record_call(
+                    response_kind=response_kind,
+                    model=model,
+                    success=True,
+                    latency_sec=time.time() - t0,
+                    error="",
+                )
+                return content
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if attempt >= self.max_retries:
-                    break
-                LOGGER.warning("DeepSeek call failed (%s/%s): %s", attempt + 1, self.max_retries + 1, exc)
-                time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"DeepSeek API call failed after retries: {last_exc}")
+                err_msg = str(exc)
+                self._record_call(
+                    response_kind=response_kind,
+                    model=model,
+                    success=False,
+                    latency_sec=time.time() - t0,
+                    error=err_msg,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(1.2 * (attempt + 1))
+        raise RuntimeError(f"DeepSeek API call failed after retries ({response_kind}, model={model}): {last_exc}")
